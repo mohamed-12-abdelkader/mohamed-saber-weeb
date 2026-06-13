@@ -4,12 +4,15 @@ import {
   CheckCircle2,
   CreditCard,
   Gift,
+  KeyRound,
   Loader2,
+  Mail,
   Settings2,
   Shield,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import * as cs from '@/lib/courses-settings-api';
+import { getUser, setSession, type AuthUser } from '@/lib/auth-storage';
 import { apiErr } from '@/lib/library-errors';
 import type { CoursesAccessMode } from '@/types/courses-settings';
 
@@ -53,6 +56,14 @@ export function CoursesSettingsView() {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [adminEmail, setAdminEmail] = useState(() => getUser()?.email ?? '');
+  const [currentAdminEmail, setCurrentAdminEmail] = useState(() => getUser()?.email ?? '');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [credentialsSaving, setCredentialsSaving] = useState(false);
+  const [credentialsErr, setCredentialsErr] = useState<string | null>(null);
+  const [credentialsSuccess, setCredentialsSuccess] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -99,6 +110,55 @@ export function CoursesSettingsView() {
     }
   }
 
+  async function handleCredentialsSave(e: React.FormEvent) {
+    e.preventDefault();
+    setCredentialsErr(null);
+    setCredentialsSuccess(null);
+
+    const nextEmail = adminEmail.trim();
+    const nextPassword = newPassword.trim();
+    const emailChanged = nextEmail !== currentAdminEmail;
+
+    if (!currentPassword) {
+      setCredentialsErr('اكتب الباسورد الحالي أولًا.');
+      return;
+    }
+
+    if (!emailChanged && !nextPassword) {
+      setCredentialsErr('اكتب إيميل جديد أو باسورد جديد للحفظ.');
+      return;
+    }
+
+    if (nextPassword && nextPassword !== confirmNewPassword) {
+      setCredentialsErr('تأكيد الباسورد الجديد غير مطابق.');
+      return;
+    }
+
+    setCredentialsSaving(true);
+    try {
+      const data = await cs.updateAdminCredentials({
+        current_password: currentPassword,
+        ...(emailChanged ? { email: nextEmail } : {}),
+        ...(nextPassword ? { new_password: nextPassword } : {}),
+      });
+      const user: AuthUser = {
+        ...data.user,
+        phone: data.user.phone ?? '',
+      };
+      setSession(data.token, user);
+      setAdminEmail(data.user.email);
+      setCurrentAdminEmail(data.user.email);
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setCredentialsSuccess('تم تحديث بيانات الأدمن بنجاح.');
+    } catch (e) {
+      setCredentialsErr(apiErr(e));
+    } finally {
+      setCredentialsSaving(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-4xl px-4 py-8 md:px-6 md:py-10">
       <div className="mb-8 flex items-start gap-4">
@@ -140,6 +200,104 @@ export function CoursesSettingsView() {
         </div>
       ) : (
         <div className="space-y-6">
+          <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="flex items-start gap-3 text-right">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-blue-600 text-white">
+                <KeyRound className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-zinc-900 dark:text-white">
+                  تغيير بيانات الأدمن
+                </h2>
+                <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                  يستخدم المسار{' '}
+                  <code className="rounded bg-zinc-100 px-1 text-xs dark:bg-zinc-800">
+                    PATCH /api/user/admin/me/credentials
+                  </code>
+                </p>
+              </div>
+            </div>
+
+            {credentialsErr && (
+              <div className="mt-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
+                {credentialsErr}
+              </div>
+            )}
+            {credentialsSuccess && (
+              <div className="mt-5 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-100">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                {credentialsSuccess}
+              </div>
+            )}
+
+            <form onSubmit={handleCredentialsSave} className="mt-5 space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="block text-right">
+                  <span className="text-xs font-bold text-zinc-500">الإيميل الجديد</span>
+                  <div className="mt-2 flex items-center gap-2 rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 dark:border-zinc-700 dark:bg-zinc-950">
+                    <Mail className="h-4 w-4 text-zinc-400" />
+                    <input
+                      type="email"
+                      value={adminEmail}
+                      onChange={(e) => setAdminEmail(e.target.value)}
+                      className="min-w-0 flex-1 bg-transparent text-right text-sm text-zinc-900 outline-none dark:text-white"
+                      placeholder="new-admin@example.com"
+                      dir="ltr"
+                    />
+                  </div>
+                </label>
+
+                <label className="block text-right">
+                  <span className="text-xs font-bold text-zinc-500">الباسورد الحالي</span>
+                  <input
+                    type="password"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-right text-sm text-zinc-900 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-white"
+                    placeholder="oldPassword123"
+                  />
+                </label>
+
+                <label className="block text-right">
+                  <span className="text-xs font-bold text-zinc-500">الباسورد الجديد</span>
+                  <input
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-right text-sm text-zinc-900 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-white"
+                    placeholder="newPassword123"
+                  />
+                </label>
+
+                <label className="block text-right">
+                  <span className="text-xs font-bold text-zinc-500">تأكيد الباسورد الجديد</span>
+                  <input
+                    type="password"
+                    value={confirmNewPassword}
+                    onChange={(e) => setConfirmNewPassword(e.target.value)}
+                    className="mt-2 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2.5 text-right text-sm text-zinc-900 outline-none focus:border-blue-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-white"
+                    placeholder="newPassword123"
+                  />
+                </label>
+              </div>
+
+              <button
+                type="submit"
+                disabled={credentialsSaving}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-600 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto sm:px-8"
+              >
+                {credentialsSaving ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    جاري تحديث بيانات الأدمن…
+                  </>
+                ) : (
+                  'تحديث بيانات الأدمن'
+                )}
+              </button>
+            </form>
+          </section>
+
           <section className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
             <div className="flex items-center gap-2 text-sm font-semibold text-zinc-800 dark:text-zinc-200">
               <Shield className="h-4 w-4 text-indigo-600" />

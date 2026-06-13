@@ -1,5 +1,5 @@
-import { LibraryHome } from '@/components/library/library-home';
+import { AdminCoursesManagement } from '@/components/library/admin-courses-management';
 
 export default function LibraryPage() {
-  return <LibraryHome />;
+  return <AdminCoursesManagement />;
 }

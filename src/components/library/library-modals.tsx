@@ -1,6 +1,6 @@
 'use client';
 
-import { CheckCircle2, Circle, ImagePlus, Trash2, UploadCloud, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, CheckCircle2, Circle, ImagePlus, Trash2, UploadCloud, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { apiErr } from '@/lib/library-errors';
 import * as ql from '@/lib/question-library-api';
@@ -401,12 +401,25 @@ export function BulkFormBody({
 
   function onPickFiles(nextFiles: FileList | null) {
     if (!nextFiles?.length) return;
-    const incoming = Array.from(nextFiles).map((file) => ({
+    const sorted = Array.from(nextFiles).sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
+    );
+    const incoming = sorted.map((file) => ({
       id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
       previewUrl: URL.createObjectURL(file),
       file,
     }));
     setFiles((prev) => [...prev, ...incoming]);
+  }
+
+  function moveFile(index: number, direction: 'up' | 'down') {
+    setFiles((prev) => {
+      const next = [...prev];
+      const target = direction === 'up' ? index - 1 : index + 1;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
   }
 
   function removeFile(id: string) {
@@ -487,21 +500,44 @@ export function BulkFormBody({
             </button>
           </div>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            {files.map((item) => (
+            {files.map((item, idx) => (
               <div
                 key={item.id}
                 className="group relative overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900"
               >
+                <span className="absolute start-2 top-2 z-10 flex h-6 min-w-6 items-center justify-center rounded-full bg-indigo-600 px-1.5 text-xs font-bold text-white shadow">
+                  {idx + 1}
+                </span>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={item.previewUrl}
                   alt={item.file.name}
                   className="h-28 w-full object-cover"
                 />
-                <div className="p-2">
-                  <p className="truncate text-xs text-zinc-600 dark:text-zinc-400">
+                <div className="flex items-center justify-between gap-1 p-2">
+                  <p className="min-w-0 flex-1 truncate text-xs text-zinc-600 dark:text-zinc-400">
                     {item.file.name}
                   </p>
+                  <div className="flex shrink-0 gap-0.5">
+                    <button
+                      type="button"
+                      disabled={idx === 0}
+                      onClick={() => moveFile(idx, 'up')}
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+                      aria-label="تقديم"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={idx === files.length - 1}
+                      onClick={() => moveFile(idx, 'down')}
+                      className="inline-flex h-6 w-6 items-center justify-center rounded-md text-zinc-500 transition hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+                      aria-label="تأخير"
+                    >
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 </div>
                 <button
                   type="button"

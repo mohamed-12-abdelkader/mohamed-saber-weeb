@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Circle,
   Expand,
+  FileText,
   HelpCircle,
   ImagePlus,
   LayoutGrid,
@@ -14,7 +15,9 @@ import {
   PlusCircle,
   ScrollText,
   Trash2,
+  UploadCloud,
 } from 'lucide-react';
+import katex from 'katex';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -27,10 +30,219 @@ import {
   type ModalState,
 } from '@/components/library/library-modals';
 import { apiErr } from '@/lib/library-errors';
+import {
+  extractQuestionsFromFile,
+  type OcrExtractedQuestion,
+} from '@/lib/ocr-api';
 import * as ql from '@/lib/question-library-api';
 import type { OptionKey, QuestionListItem } from '@/types/question-library';
+import { OPTION_KEYS } from '@/types/question-library';
 
 type AddTab = 'mcq' | 'bulk' | 'arabic';
+
+type MathPart =
+  | { type: 'text'; value: string }
+  | { type: 'math'; value: string; displayMode: boolean };
+
+const ARABIC_OPTION_KEYS: Record<string, OptionKey> = {
+  أ: 'A',
+  ا: 'A',
+  ب: 'B',
+  ج: 'C',
+  د: 'D',
+};
+
+const ARABIC_MATH_LETTERS = /[\u0621-\u064A]+/g;
+
+function normalizeMathForKatex(value: string) {
+  return value
+    .replace(/٪/g, '\\%')
+    .replace(/(^|[^\\])%/g, '$1\\%')
+    .replace(/×/g, '\\times ')
+    .replace(/÷/g, '\\div ')
+    .replace(ARABIC_MATH_LETTERS, (letters) => `\\text{${letters}}`);
+}
+
+function splitMathText(text: string): MathPart[] {
+  const parts: MathPart[] = [];
+  const re = /(\$\$[\s\S]+?\$\$|\$[^$\n]+?\$|\\\([\s\S]+?\\\)|\\\[[\s\S]+?\\\])/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ type: 'text', value: text.slice(lastIndex, match.index) });
+    }
+
+    const raw = match[0];
+    const displayMode = raw.startsWith('$$') || raw.startsWith('\\[');
+    const value = raw.startsWith('$$')
+      ? raw.slice(2, -2)
+      : raw.startsWith('$')
+      ? raw.slice(1, -1)
+      : raw.startsWith('\\[')
+      ? raw.slice(2, -2)
+      : raw.slice(2, -2);
+
+    parts.push({ type: 'math', value, displayMode });
+    lastIndex = match.index + raw.length;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push({ type: 'text', value: text.slice(lastIndex) });
+  }
+
+  return parts.length ? parts : [{ type: 'text', value: text }];
+}
+
+function renderMath(value: string, displayMode: boolean) {
+  try {
+    return katex.renderToString(normalizeMathForKatex(value), {
+      displayMode,
+      output: 'html',
+      strict: 'ignore',
+      throwOnError: false,
+      trust: false,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function MathText({
+  text,
+  fallback,
+}: {
+  text: string | null | undefined;
+  fallback?: React.ReactNode;
+}) {
+  const trimmed = text?.trim();
+  if (!trimmed) return <>{fallback ?? null}</>;
+
+  return (
+    <span dir="auto" style={{ unicodeBidi: 'plaintext' }}>
+      {splitMathText(trimmed).map((part, index) => {
+        if (part.type === 'text') {
+          return (
+            <span key={index} className="whitespace-pre-wrap">
+              {part.value}
+            </span>
+          );
+        }
+
+        const html = renderMath(part.value, part.displayMode);
+        if (!html) {
+          return (
+            <span key={index} className="font-mono">
+              {part.value}
+            </span>
+          );
+        }
+
+        return (
+          <span
+            key={index}
+            dir="ltr"
+            className={
+              part.displayMode
+                ? 'my-2 block overflow-x-auto'
+                : 'inline-block align-middle'
+            }
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
+function optionKeyFromLabel(label: string, index: number): OptionKey | null {
+  const normalized = label.trim().replace(/[).:،]/g, '');
+  if (OPTION_KEYS.includes(normalized as OptionKey)) {
+    return normalized as OptionKey;
+  }
+  return ARABIC_OPTION_KEYS[normalized] ?? OPTION_KEYS[index] ?? null;
+}
+
+function correctKeyFromQuestion(question: OcrExtractedQuestion): OptionKey | null {
+  const byIndex = question.correct_answer_index;
+  if (
+    byIndex != null &&
+    Number.isInteger(byIndex) &&
+    byIndex >= 0 &&
+    byIndex < OPTION_KEYS.length
+  ) {
+    return OPTION_KEYS[byIndex];
+  }
+
+  const correct = question.correct_answer?.trim();
+  if (!correct) return null;
+
+  const direct = optionKeyFromLabel(correct, -1);
+  if (direct) return direct;
+
+  const optionIndex = question.options.findIndex(
+    (option) =>
+      option.label?.trim() === correct || option.text.trim() === correct
+  );
+  return optionIndex >= 0 ? OPTION_KEYS[optionIndex] : null;
+}
+
+function normalizeOcrOptions(question: OcrExtractedQuestion) {
+  return OPTION_KEYS.map((option_key, index) => {
+    const found =
+      question.options.find(
+        (option, optionIndex) =>
+          optionKeyFromLabel(option.label ?? '', optionIndex) === option_key
+      ) ?? question.options[index];
+
+    return {
+      option_key,
+      option_text: found?.text.trim() ?? '',
+    };
+  });
+}
+
+function buildPromptText(question: OcrExtractedQuestion) {
+  const prompt = question.question_text.trim();
+  const imageLines = (question.question_images ?? [])
+    .filter((image) => image.image_blob)
+    .slice(1)
+    .map(
+      (image, index) =>
+        `صورة إضافية ${index + 1}: ${image.short_description ?? 'صورة مرتبطة بالسؤال'}`
+    );
+
+  return imageLines.length
+    ? `${prompt}\n\n${imageLines.join('\n')}`
+    : prompt;
+}
+
+function primaryQuestionImage(question: OcrExtractedQuestion) {
+  return question.question_images?.find((image) => image.image_blob);
+}
+
+function questionImageSrc(question: QuestionListItem) {
+  return question.question_image_blob || question.question_image_url;
+}
+
+function isPdfFile(file: File | null) {
+  if (!file) return false;
+  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+}
+
+function isImageFile(file: File) {
+  return (
+    file.type.startsWith('image/') ||
+    /\.(png|jpe?g|webp|gif|avif|bmp|tiff?)$/i.test(file.name)
+  );
+}
+
+function selectedFilesLabel(files: File[]) {
+  if (files.length === 0) return 'اختر PDF واحد أو حتى 8 صور من الجهاز';
+  if (files.length === 1) return files[0].name;
+  return `${files.length} صور مختارة: ${files.map((file) => file.name).join('، ')}`;
+}
 
 export function LessonQuestionsView() {
   const params = useParams();
@@ -46,6 +258,7 @@ export function LessonQuestionsView() {
   const [modal, setModal] = useState<ModalState>({ type: 'none' });
   const [addTab, setAddTab] = useState<AddTab>('mcq');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isOcrModalOpen, setIsOcrModalOpen] = useState(false);
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
   /** أسئلة قيد حفظ الإجابة الصحيحة — يعطّل أزرار ذلك السؤال فقط */
   const [savingAnswerByQuestion, setSavingAnswerByQuestion] = useState<
@@ -244,7 +457,15 @@ export function LessonQuestionsView() {
       </div>
 
       {!invalidIds && (
-        <div className="mt-5">
+        <div className="mt-5 flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={() => setIsOcrModalOpen(true)}
+            className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-emerald-600/25 transition hover:bg-emerald-700"
+          >
+            <FileText className="h-4 w-4" />
+            استخراج من PDF/صورة
+          </button>
           <button
             type="button"
             onClick={() => setIsAddModalOpen(true)}
@@ -263,6 +484,17 @@ export function LessonQuestionsView() {
         >
           {banner}
         </div>
+      )}
+
+      {isOcrModalOpen && !invalidIds && (
+        <OcrImportModal
+          lessonId={lessonId}
+          onClose={() => setIsOcrModalOpen(false)}
+          onDone={async () => {
+            await afterMutation();
+            setIsOcrModalOpen(false);
+          }}
+        />
       )}
 
       {isAddModalOpen && !invalidIds && (
@@ -384,44 +616,57 @@ export function LessonQuestionsView() {
             </p>
           </div>
         ) : (
-          <div className="grid gap-5 md:grid-cols-2">
-            {questions.map((q) => (
+          <div className="grid gap-5">
+            {questions.map((q) => {
+              const imageSrc = questionImageSrc(q);
+
+              return (
               <article
                 key={q.question_id}
-                className="flex flex-col rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm transition hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900"
+                className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm transition hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900"
               >
-                <div className="flex gap-4">
-                  {q.question_image_url ? (
-                    <button
-                      type="button"
-                      onClick={() => setPreviewImageUrl(q.question_image_url)}
-                      className="group relative h-36 w-36 shrink-0 overflow-hidden rounded-xl border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800"
-                      aria-label="تكبير صورة السؤال"
-                    >
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={q.question_image_url}
-                        alt="صورة السؤال"
-                        className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
-                      />
-                      <span className="absolute inset-x-0 bottom-0 inline-flex items-center justify-center gap-1 bg-black/55 py-1 text-xs text-white opacity-0 transition-opacity group-hover:opacity-100">
-                        <Expand className="h-3.5 w-3.5" />
-                        تكبير
-                      </span>
-                    </button>
-                  ) : (
-                    <div className="flex h-36 w-36 shrink-0 items-center justify-center rounded-xl bg-zinc-100 dark:bg-zinc-800">
-                      <HelpCircle className="h-10 w-10 text-zinc-400" />
-                    </div>
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-medium text-indigo-600 dark:text-indigo-400">
+                {imageSrc ? (
+                  <button
+                    type="button"
+                    onClick={() => setPreviewImageUrl(imageSrc)}
+                    className="group relative w-full overflow-hidden border-b border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800"
+                    aria-label="تكبير صورة السؤال"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={imageSrc}
+                      alt="صورة السؤال"
+                      className="max-h-[28rem] w-full object-contain transition-transform duration-200 group-hover:scale-[1.02]"
+                    />
+                    <span className="absolute inset-x-0 bottom-0 inline-flex items-center justify-center gap-1 bg-black/55 py-1.5 text-xs text-white opacity-0 transition-opacity group-hover:opacity-100">
+                      <Expand className="h-3.5 w-3.5" />
+                      تكبير
+                    </span>
+                  </button>
+                ) : null}
+                <div className="p-5">
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-bold text-indigo-800 dark:bg-indigo-950 dark:text-indigo-100">
+                      #{q.question_id}
+                    </span>
+                    <span className="text-xs font-medium text-indigo-600 dark:text-indigo-400">
                       {q.course.title} ← {q.lesson.title}
-                    </p>
-                    <p className="mt-2 font-medium leading-snug text-zinc-900 dark:text-zinc-50">
-                      {q.prompt_text || '(سؤال صورة)'}
-                    </p>
+                    </span>
+                    {q.question_image_blob && (
+                      <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-bold text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-100">
+                        صورة blob
+                      </span>
+                    )}
+                    {!q.question_image_blob && q.question_image_url && (
+                      <span className="rounded-full bg-sky-100 px-2.5 py-1 text-xs font-bold text-sky-800 dark:bg-sky-950/50 dark:text-sky-100">
+                        صورة URL
+                      </span>
+                    )}
                   </div>
+                  <p className="rounded-2xl bg-zinc-50 px-4 py-3 text-base font-semibold leading-8 text-zinc-900 dark:bg-zinc-950/60 dark:text-zinc-50">
+                    <MathText text={q.prompt_text} fallback="(سؤال صورة)" />
+                  </p>
                 </div>
                 <ul className="mt-4 grid gap-2 border-t border-zinc-100 pt-4 dark:border-zinc-800">
                   {q.options.map((o) => {
@@ -450,7 +695,7 @@ export function LessonQuestionsView() {
                           )
                         }
                         disabled={saving}
-                        className="flex w-full items-start gap-2 px-3 py-2 text-start text-sm disabled:opacity-70"
+                        className="flex w-full items-start gap-2 px-3 py-2.5 text-start text-base disabled:opacity-70"
                       >
                         {pending && saving ? (
                           <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-amber-600" />
@@ -459,7 +704,7 @@ export function LessonQuestionsView() {
                         ) : (
                           <Circle className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" />
                         )}
-                        <span className="font-mono text-xs opacity-70">
+                        <span className="font-mono text-sm opacity-70">
                           {o.option_key}.
                         </span>
                         <span
@@ -472,7 +717,7 @@ export function LessonQuestionsView() {
                           }`}
                         >
                           {o.option_text?.trim()
-                            ? o.option_text
+                            ? <MathText text={o.option_text} />
                             : (
                                 <span className="text-zinc-400 italic">
                                   (فارغ — سيُستخدم «خيار {o.option_key}» عند الحفظ)
@@ -523,8 +768,10 @@ export function LessonQuestionsView() {
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
+                </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
@@ -561,5 +808,499 @@ export function LessonQuestionsView() {
         </ModalBackdrop>
       )}
     </div>
+  );
+}
+
+function OcrImportModal({
+  lessonId,
+  onClose,
+  onDone,
+}: {
+  lessonId: number;
+  onClose: () => void;
+  onDone: () => Promise<void>;
+}) {
+  const [files, setFiles] = useState<File[]>([]);
+  const [inferCorrectAnswer, setInferCorrectAnswer] = useState(false);
+  const [includeQuestionImages, setIncludeQuestionImages] = useState(true);
+  const [pageFrom, setPageFrom] = useState('');
+  const [pageTo, setPageTo] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [result, setResult] = useState<Awaited<
+    ReturnType<typeof extractQuestionsFromFile>
+  > | null>(null);
+  const [correctByIndex, setCorrectByIndex] = useState<
+    Partial<Record<number, OptionKey>>
+  >({});
+
+  function pickFiles(nextFiles: FileList | null) {
+    const picked = nextFiles
+      ? Array.from(nextFiles).sort((a, b) =>
+          a.name.localeCompare(b.name, undefined, {
+            numeric: true,
+            sensitivity: 'base',
+          })
+        )
+      : [];
+    setFiles(picked);
+    setResult(null);
+    setCorrectByIndex({});
+    setPageFrom('');
+    setPageTo('');
+    setErr(null);
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    if (files.length === 0) {
+      setErr('اختر ملف PDF أو صورة واحدة على الأقل أولًا');
+      return;
+    }
+    if (files.length > 8) {
+      setErr('الحد الأقصى هو 8 ملفات في طلب الاستخراج الواحد.');
+      return;
+    }
+    const pdfFiles = files.filter((item) => isPdfFile(item));
+    if (pdfFiles.length > 0 && files.length > 1) {
+      setErr('لا يمكن رفع PDF مع ملفات أخرى. ارفع PDF واحد فقط أو عدة صور.');
+      return;
+    }
+    if (pdfFiles.length === 0 && files.some((item) => !isImageFile(item))) {
+      setErr('الرفع المتعدد متاح للصور فقط. الصيغ المدعومة موضحة أعلى.');
+      return;
+    }
+    const hasPageRange = pageFrom.trim() || pageTo.trim();
+    const parsedPageFrom = pageFrom.trim() ? Number(pageFrom) : undefined;
+    const parsedPageTo = pageTo.trim() ? Number(pageTo) : undefined;
+
+    if (hasPageRange) {
+      if (!fileIsPdf) {
+        setErr('تحديد الصفحات متاح لملفات PDF فقط.');
+        return;
+      }
+      if (
+        !parsedPageFrom ||
+        !parsedPageTo ||
+        !Number.isInteger(parsedPageFrom) ||
+        !Number.isInteger(parsedPageTo) ||
+        parsedPageFrom < 1 ||
+        parsedPageTo < parsedPageFrom
+      ) {
+        setErr('اكتب نطاق صفحات صحيح: من صفحة رقم 1 أو أكثر، وإلى صفحة أكبر أو مساوية لها.');
+        return;
+      }
+    }
+
+    setBusy(true);
+    try {
+      const data = await extractQuestionsFromFile(files, {
+        inferCorrectAnswer,
+        includeQuestionImages,
+        pageFrom: parsedPageFrom,
+        pageTo: parsedPageTo,
+      });
+      const defaults: Partial<Record<number, OptionKey>> = {};
+      data.questions.forEach((question, index) => {
+        const key = correctKeyFromQuestion(question);
+        if (key) defaults[index] = key;
+      });
+      setResult(data);
+      setCorrectByIndex(defaults);
+    } catch (e) {
+      setErr(apiErr(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const fileIsPdf = files.length === 1 && isPdfFile(files[0]);
+
+  function canSaveQuestion(question: OcrExtractedQuestion) {
+    const options = normalizeOcrOptions(question);
+    return (
+      question.question_text.trim().length > 0 &&
+      options.length === 4 &&
+      options.every((option) => option.option_text.trim().length > 0)
+    );
+  }
+
+  function removeExtractedQuestion(questionIndex: number) {
+    setResult((prev) => {
+      if (!prev) return prev;
+      const questions = prev.questions.filter((_, index) => index !== questionIndex);
+      return {
+        ...prev,
+        question_count: questions.length,
+        questions,
+      };
+    });
+    setCorrectByIndex((prev) => {
+      const next: Partial<Record<number, OptionKey>> = {};
+      for (const [key, value] of Object.entries(prev)) {
+        const index = Number(key);
+        if (index < questionIndex) {
+          next[index] = value;
+        } else if (index > questionIndex) {
+          next[index - 1] = value;
+        }
+      }
+      return next;
+    });
+    setErr(null);
+  }
+
+  async function addExtractedQuestions() {
+    if (!result) return;
+    if (result.questions.length === 0) {
+      setErr('لا توجد أسئلة متبقية للإضافة.');
+      return;
+    }
+
+    const invalidIndex = result.questions.findIndex((question) => !canSaveQuestion(question));
+    if (invalidIndex >= 0) {
+      setErr(`السؤال رقم ${invalidIndex + 1} لا يحتوي نصًا أو 4 اختيارات صالحة.`);
+      return;
+    }
+
+    const missingCorrectIndex = result.questions.findIndex(
+      (_question, index) => !correctByIndex[index]
+    );
+    if (missingCorrectIndex >= 0) {
+      setErr(`حدد الإجابة الصحيحة للسؤال رقم ${missingCorrectIndex + 1} قبل الإضافة.`);
+      return;
+    }
+
+    setErr(null);
+    setAdding(true);
+    try {
+      for (const [index, question] of result.questions.entries()) {
+        const correct_option_key = correctByIndex[index];
+        if (!correct_option_key) continue;
+
+        const primaryImage = primaryQuestionImage(question);
+        await ql.createMcqQuestion(lessonId, {
+          prompt_text: buildPromptText(question),
+          ...(primaryImage?.image_blob
+            ? {
+                question_image_blob: primaryImage.image_blob,
+                ...(primaryImage.image_mime_type
+                  ? { question_image_mime_type: primaryImage.image_mime_type }
+                  : {}),
+              }
+            : {}),
+          options: normalizeOcrOptions(question),
+          correct_option_key,
+        });
+      }
+      await onDone();
+    } catch (e) {
+      setErr(apiErr(e));
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  return (
+    <ModalBackdrop title="استخراج أسئلة من PDF أو صور" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-5">
+        <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm leading-7 text-emerald-950 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-100">
+          ارفع ملف PDF واحد أو عدة صور، وسيتم إرسال الطلب إلى خدمة OCR لاستخراج الأسئلة كـ
+          Markdown + LaTeX. راجع النتيجة وحدد الإجابات الناقصة قبل إضافتها للدرس.
+        </div>
+
+        <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50/60 p-4 dark:border-zinc-700 dark:bg-zinc-900/40">
+          <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
+            ملف PDF واحد أو حتى 8 صور
+          </label>
+          <label className="mt-2 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-zinc-300 bg-white px-4 py-6 text-center text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800">
+            <UploadCloud className="h-6 w-6 text-emerald-600" />
+            <span className="max-w-full truncate">{selectedFilesLabel(files)}</span>
+            <span className="text-xs font-normal text-zinc-500">
+              PDF يرفع منفردًا. الصور يمكن رفعها معًا حتى 8 ملفات. الحد الأقصى 50MB لكل ملف.
+            </span>
+            <input
+              type="file"
+              accept="application/pdf,.pdf,image/png,image/jpeg,image/jpg,image/webp,image/gif,image/avif,image/bmp,image/tiff"
+              multiple
+              onChange={(e) => pickFiles(e.target.files)}
+              className="hidden"
+            />
+          </label>
+          {files.length > 1 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {files.map((item) => (
+                <span
+                  key={`${item.name}-${item.size}-${item.lastModified}`}
+                  className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                >
+                  {item.name}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+                من صفحة (PDF فقط)
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={pageFrom}
+                disabled={!fileIsPdf}
+                onChange={(e) => setPageFrom(e.target.value)}
+                placeholder="مثال: 2"
+                className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-950 dark:disabled:bg-zinc-800"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+                إلى صفحة (PDF فقط)
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={pageTo}
+                disabled={!fileIsPdf}
+                onChange={(e) => setPageTo(e.target.value)}
+                placeholder="مثال: 4"
+                className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400 dark:border-zinc-600 dark:bg-zinc-950 dark:disabled:bg-zinc-800"
+              />
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-zinc-500">
+            اترك النطاق فارغًا لاستخراج كل الملف. عند استخدامه يجب ملء الحقلين معًا.
+          </p>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-700 dark:bg-zinc-900">
+            <input
+              type="checkbox"
+              checked={inferCorrectAnswer}
+              onChange={(e) => setInferCorrectAnswer(e.target.checked)}
+              className="mt-1"
+            />
+            <span className="text-sm text-zinc-700 dark:text-zinc-300">
+              <strong>استنتاج الإجابة الصحيحة</strong>
+              <span className="block text-xs text-zinc-500">
+                تظهر كاقتراح لو لم تكن الإجابة مكتوبة بوضوح في الملف.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-700 dark:bg-zinc-900">
+            <input
+              type="checkbox"
+              checked={includeQuestionImages}
+              onChange={(e) => setIncludeQuestionImages(e.target.checked)}
+              className="mt-1"
+            />
+            <span className="text-sm text-zinc-700 dark:text-zinc-300">
+              <strong>استخراج صور الأسئلة</strong>
+              <span className="block text-xs text-zinc-500">
+                ستظهر الصور المستخرجة في المعاينة وتحفظ كـ blob داخل قاعدة البيانات.
+              </span>
+            </span>
+          </label>
+        </div>
+
+        {err && (
+          <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
+            {err}
+          </p>
+        )}
+
+        <button
+          type="submit"
+          disabled={busy || files.length === 0}
+          className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 py-3 font-semibold text-white shadow-lg shadow-emerald-600/20 transition hover:bg-emerald-700 disabled:opacity-60"
+        >
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />}
+          {busy ? 'جاري استخراج الأسئلة…' : 'تنفيذ الاستخراج'}
+        </button>
+      </form>
+
+      {result && (
+        <section className="mt-6 space-y-5 border-t border-zinc-100 pt-5 dark:border-zinc-800">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-bold text-zinc-900 dark:text-white">
+                نتيجة الاستخراج
+              </h3>
+              <p className="text-sm text-zinc-500">
+                {result.filename} · {result.page_count} صفحة ·{' '}
+                {result.question_count} سؤال
+                {result.page_range
+                  ? ` · الصفحات ${result.page_range.page_from}-${result.page_range.page_to}`
+                  : ''}
+                {result.extracted_images?.length
+                  ? ` · ${result.extracted_images.length} صورة مستخرجة`
+                  : ''}
+              </p>
+              {result.source_files?.length ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {result.source_files.map((source) => (
+                    <span
+                      key={`${source.filename}-${source.mime_type}`}
+                      className="rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300"
+                    >
+                      {source.filename}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => void addExtractedQuestions()}
+              disabled={adding || busy || result.questions.length === 0}
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-60"
+            >
+              {adding ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <PlusCircle className="h-4 w-4" />
+              )}
+              {adding ? 'جاري الإضافة…' : 'إضافة الأسئلة للدرس'}
+            </button>
+          </div>
+
+          {result.notes && (
+            <p className="rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950/30 dark:text-amber-100">
+              {result.notes}
+            </p>
+          )}
+
+          <div className="space-y-4">
+            {result.questions.length === 0 && (
+              <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900/40">
+                تم حذف كل الأسئلة من قائمة الاستيراد. نفّذ الاستخراج مرة أخرى إذا أردت إضافتها.
+              </div>
+            )}
+            {result.questions.map((question, questionIndex) => {
+              const options = normalizeOcrOptions(question);
+              const selected = correctByIndex[questionIndex];
+              const saveable = canSaveQuestion(question);
+
+              return (
+                <article
+                  key={`${question.number}-${questionIndex}`}
+                  className={`rounded-2xl border bg-white p-4 dark:bg-zinc-900 ${
+                    saveable
+                      ? 'border-zinc-200 dark:border-zinc-700'
+                      : 'border-red-200 dark:border-red-900/60'
+                  }`}
+                >
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-bold text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200">
+                        سؤال {question.source_number ?? question.number}
+                      </span>
+                      {question.correct_answer_inferred && (
+                        <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800 dark:bg-amber-950/50 dark:text-amber-100">
+                          الإجابة مقترحة بالاستنتاج
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeExtractedQuestion(questionIndex)}
+                      disabled={adding}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-3 py-1 text-xs font-bold text-red-700 transition hover:bg-red-100 disabled:opacity-60 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-200 dark:hover:bg-red-950/50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      حذف من الاستيراد
+                    </button>
+                  </div>
+
+                  <p className="text-sm font-semibold leading-7 text-zinc-900 dark:text-zinc-50">
+                    <MathText text={question.question_text} />
+                  </p>
+
+                  {(question.question_images?.length ?? 0) > 0 && (
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      {question.question_images?.map((image, index) => (
+                        <div
+                          key={`${image.image_id ?? image.image_blob ?? index}`}
+                          className="rounded-xl border border-zinc-200 bg-zinc-50 p-2 text-xs text-zinc-600 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                        >
+                          {image.image_blob ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={image.image_blob}
+                              alt={image.short_description ?? 'صورة سؤال مستخرجة'}
+                              className="mb-2 max-h-40 w-full rounded-lg object-contain"
+                            />
+                          ) : null}
+                          {image.short_description ?? image.image_id ?? 'صورة مرتبطة بالسؤال'}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="mt-4 grid gap-2">
+                    {options.map((option) => {
+                      const active = selected === option.option_key;
+                      return (
+                        <button
+                          key={option.option_key}
+                          type="button"
+                          onClick={() =>
+                            setCorrectByIndex((prev) => ({
+                              ...prev,
+                              [questionIndex]: option.option_key,
+                            }))
+                          }
+                          className={`flex items-start gap-2 rounded-xl border px-3 py-2 text-start text-sm transition ${
+                            active
+                              ? 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-100'
+                              : 'border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/40 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                          }`}
+                        >
+                          {active ? (
+                            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                          ) : (
+                            <Circle className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" />
+                          )}
+                          <span className="font-mono text-xs opacity-70">
+                            {option.option_key}.
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <MathText
+                              text={option.option_text}
+                              fallback={
+                                <span className="italic text-red-500">
+                                  خيار فارغ
+                                </span>
+                              }
+                            />
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+
+          <details className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-sm dark:border-zinc-700 dark:bg-zinc-950">
+            <summary className="cursor-pointer font-semibold text-zinc-800 dark:text-zinc-100">
+              عرض response الخام
+            </summary>
+            <pre
+              dir="ltr"
+              className="mt-3 max-h-80 overflow-auto rounded-xl bg-zinc-950 p-4 text-xs leading-relaxed text-zinc-100"
+            >
+              {JSON.stringify(result, null, 2)}
+            </pre>
+          </details>
+        </section>
+      )}
+    </ModalBackdrop>
   );
 }

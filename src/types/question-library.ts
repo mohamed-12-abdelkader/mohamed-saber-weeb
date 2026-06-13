@@ -34,6 +34,8 @@ export type QuestionOption = {
 export type QuestionListItem = {
   question_id: number;
   question_image_url: string | null;
+  question_image_blob?: string | null;
+  question_image_mime_type?: string | null;
   prompt_text: string | null;
   lesson: { id: number; title: string };
   course: { id: number; title: string };
@@ -44,6 +46,8 @@ export type QuestionDetail = {
   id: number;
   lesson_id: number;
   question_image_url: string | null;
+  question_image_blob?: string | null;
+  question_image_mime_type?: string | null;
   prompt_text: string | null;
   created_at: string;
   updated_at: string;

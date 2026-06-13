@@ -85,6 +85,8 @@ export async function createMcqQuestion(
   lessonId: number,
   payload: {
     prompt_text: string;
+    question_image_blob?: string;
+    question_image_mime_type?: string;
     options: { option_key: 'A' | 'B' | 'C' | 'D'; option_text: string }[];
     correct_option_key: 'A' | 'B' | 'C' | 'D';
   }
@@ -134,6 +136,22 @@ export async function putQuestionOptions(
   }
 ): Promise<void> {
   await api.put(`${BASE}/questions/${questionId}/options`, payload);
+}
+
+export async function updateQuestion(
+  questionId: number,
+  payload: {
+    prompt_text?: string | null;
+    question_image_url?: string;
+    question_image_blob?: string | null;
+    question_image_mime_type?: string | null;
+  }
+): Promise<QuestionDetail> {
+  const { data } = await api.patch<{ question: QuestionDetail }>(
+    `${BASE}/questions/${questionId}`,
+    payload
+  );
+  return data.question;
 }
 
 export async function deleteQuestion(questionId: number): Promise<void> {
