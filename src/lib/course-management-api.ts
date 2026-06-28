@@ -179,6 +179,42 @@ export async function fetchCourseDetails(
   return data;
 }
 
+export type CourseManagementListItem = {
+  id: number;
+  title: string;
+};
+
+export type CourseLevelExamListItem = {
+  id: number;
+  title: string;
+  course_level_id?: number;
+};
+
+export async function fetchCourseManagementCourses(): Promise<CourseManagementListItem[]> {
+  const { data } = await api.get<{ courses: CourseManagementListItem[] }>(
+    `${BASE}/courses`
+  );
+  return data.courses ?? [];
+}
+
+export async function fetchCourseLevelExamsForCourse(
+  courseId: number
+): Promise<CourseLevelExamListItem[]> {
+  const { data } = await api.get<{ level_exams: CourseLevelExamListItem[] }>(
+    `${BASE}/courses/${courseId}/exams`
+  );
+  return data.level_exams ?? [];
+}
+
+export async function fetchCourseGeneralExamsForCourse(
+  courseId: number
+): Promise<CourseGeneralExam[]> {
+  const { data } = await api.get<{ exams: CourseGeneralExam[] }>(
+    `${BASE}/courses/${courseId}/general-exams`
+  );
+  return data.exams ?? [];
+}
+
 export async function createCourseLevel(
   courseId: number,
   payload: CourseLevelPayload

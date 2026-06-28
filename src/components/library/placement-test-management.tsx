@@ -5,6 +5,7 @@ import {
   Circle,
   ClipboardList,
   FileQuestion,
+  FileText,
   Gauge,
   ImageIcon,
   Import,
@@ -20,10 +21,18 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { MathText } from '@/components/library/math-text';
+import { OcrImportModal } from '@/components/library/ocr-import-modal';
 import { apiErr } from '@/lib/library-errors';
+import {
+  buildPromptText,
+  normalizeOcrOptions,
+  primaryQuestionImage,
+} from '@/lib/ocr-question-utils';
 import * as placement from '@/lib/placement-test-api';
 import * as ql from '@/lib/question-library-api';
 import type { QuestionListItem } from '@/types/question-library';
+import { OPTION_KEYS } from '@/types/question-library';
 
 type Tab = 'levels' | 'test' | 'questions' | 'attempts';
 
@@ -70,6 +79,7 @@ export function PlacementTestManagement() {
     { mode: 'create' } | { mode: 'edit'; question: placement.PlacementQuestion } | null
   >(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [ocrOpen, setOcrOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<
     | { type: 'level'; id: number; title: string }
     | { type: 'test'; id: number; title: string }
@@ -250,6 +260,7 @@ export function PlacementTestManagement() {
           onRefresh={() => loadQuestions()}
           onCreate={() => setQuestionModal({ mode: 'create' })}
           onImport={() => setImportOpen(true)}
+          onOcr={() => setOcrOpen(true)}
           onEdit={(question) => setQuestionModal({ mode: 'edit', question })}
           onDelete={(question) =>
             setDeleteTarget({ type: 'question', id: question.id, title: question.text })
@@ -311,6 +322,51 @@ export function PlacementTestManagement() {
             setImportOpen(false);
           }}
           onError={setBanner}
+        />
+      )}
+
+      {ocrOpen && activeTest && (
+        <OcrImportModal
+          onClose={() => setOcrOpen(false)}
+          onDone={async () => {
+            await loadQuestions(activeTest.id);
+            setOcrOpen(false);
+          }}
+          addButtonLabel="إضافة الأسئلة لاختبار التحديد"
+          introHint="راجع النتيجة وحدد الإجابات الناقصة قبل إضافتها لبنك أسئلة اختبار تحديد المستوى."
+          onAddQuestions={async (extractedQuestions, correctByIndex) => {
+            let position =
+              questions.length > 0
+                ? Math.max(...questions.map((q) => q.position ?? 0)) + 1
+                : 1;
+
+            for (const [index, question] of extractedQuestions.entries()) {
+              const correctKey = correctByIndex[index];
+              if (!correctKey) continue;
+
+              const correctIndex = OPTION_KEYS.indexOf(correctKey);
+              const primaryImage = primaryQuestionImage(question);
+              const payload: placement.PlacementQuestionPayload = {
+                text: buildPromptText(question),
+                points: 1,
+                position,
+                ...(primaryImage?.image_blob
+                  ? {
+                      image_blob: primaryImage.image_blob,
+                      image_mime_type: primaryImage.image_mime_type ?? null,
+                    }
+                  : {}),
+                choices: normalizeOcrOptions(question).map((option, optionIndex) => ({
+                  text: option.option_text,
+                  is_correct: optionIndex === correctIndex,
+                  position: optionIndex,
+                })),
+              };
+
+              await placement.createPlacementQuestion(activeTest.id, payload);
+              position += 1;
+            }
+          }}
         />
       )}
 
@@ -499,6 +555,7 @@ function QuestionsPanel({
   onRefresh,
   onCreate,
   onImport,
+  onOcr,
   onEdit,
   onDelete,
 }: {
@@ -508,6 +565,7 @@ function QuestionsPanel({
   onRefresh: () => Promise<void>;
   onCreate: () => void;
   onImport: () => void;
+  onOcr: () => void;
   onEdit: (question: placement.PlacementQuestion) => void;
   onDelete: (question: placement.PlacementQuestion) => void;
 }) {
@@ -526,6 +584,15 @@ function QuestionsPanel({
             <button type="button" onClick={onImport} disabled={!test} className={secondarySmallButtonClassName}>
               <Import className="h-4 w-4" />
               استيراد
+            </button>
+            <button
+              type="button"
+              onClick={onOcr}
+              disabled={!test}
+              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-emerald-700 disabled:opacity-60"
+            >
+              <FileText className="h-4 w-4" />
+              استخراج من PDF/صورة
             </button>
             <button type="button" onClick={onRefresh} disabled={!test || loading} className={ghostSmallButtonClassName}>
               <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
@@ -579,8 +646,8 @@ function QuestionCard({
         </div>
         <div className="min-w-0">
           <p className="text-xs font-black text-blue-600">سؤال #{question.position} · {question.points} نقطة</p>
-          <p className="mt-2 whitespace-pre-wrap text-base font-black leading-7 text-zinc-950 dark:text-white">
-            {question.text}
+          <p className="mt-2 text-base font-black leading-8 text-zinc-950 dark:text-white">
+            <MathText text={question.text} fallback="(سؤال بدون نص)" />
           </p>
         </div>
       </div>
@@ -611,7 +678,9 @@ function QuestionCard({
               ) : (
                 <Circle className="h-4 w-4 shrink-0 text-zinc-400" />
               )}
-              <span className="min-w-0 flex-1 font-bold">{choice.text}</span>
+              <span className="min-w-0 flex-1 font-bold">
+                <MathText text={choice.text} fallback="(خيار فارغ)" />
+              </span>
             </div>
           ))}
       </div>
@@ -938,7 +1007,14 @@ function QuestionModal({
     <Modal title={editing ? 'تعديل سؤال' : 'إضافة سؤال'} onClose={onClose} maxWidth="max-w-4xl">
       <form onSubmit={submit}>
         <div className="space-y-4">
-          <textarea value={text} onChange={(e) => setText(e.target.value)} rows={4} placeholder="نص السؤال" className={fieldClassName} />
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={4}
+            placeholder="نص السؤال — يدعم LaTeX مثل $\\frac{1}{2}$ أو $3.14$"
+            className={fieldClassName}
+            dir="auto"
+          />
           <div className="grid gap-3 md:grid-cols-3">
             <input type="number" min={0.1} step="0.1" value={points} onChange={(e) => setPoints(e.target.value)} placeholder="points" className={fieldClassName} />
             <input type="number" value={position} onChange={(e) => setPosition(e.target.value)} placeholder="position" className={fieldClassName} />
@@ -984,8 +1060,9 @@ function QuestionModal({
                   onChange={(e) =>
                     setChoices((prev) => prev.map((item, i) => (i === index ? e.target.value : item)))
                   }
-                  placeholder={`اختيار ${index + 1}`}
+                  placeholder={`اختيار ${index + 1} — مثال: $\\frac{3}{4}$`}
                   className={fieldClassName}
+                  dir="auto"
                 />
                 <button
                   type="button"
@@ -1107,7 +1184,10 @@ function ImportModal({
                   )}
                   <span className="min-w-0 flex-1">
                     <span className="block line-clamp-2 font-bold text-zinc-900 dark:text-white">
-                      {question.prompt_text || 'سؤال بدون نص'}
+                      <MathText
+                        text={question.prompt_text}
+                        fallback="سؤال بدون نص"
+                      />
                     </span>
                     <span className="mt-1 block text-xs text-zinc-500">
                       {question.course.title} · {question.lesson.title}
@@ -1152,12 +1232,16 @@ function AttemptDetailModal({
           <div className="space-y-3">
             {detail.mistakes.map((mistake) => (
               <div key={mistake.question_id} className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-right dark:border-zinc-800 dark:bg-zinc-950">
-                <p className="font-black text-zinc-950 dark:text-white">{mistake.question_text}</p>
+                <p className="font-black text-zinc-950 dark:text-white">
+                  <MathText text={mistake.question_text} />
+                </p>
                 <p className="mt-2 text-sm text-red-500">
-                  إجابة الطالب: {mistake.your_choice?.text ?? '—'}
+                  إجابة الطالب:{' '}
+                  <MathText text={mistake.your_choice?.text} fallback="—" />
                 </p>
                 <p className="mt-1 text-sm text-emerald-600">
-                  الإجابة الصحيحة: {mistake.correct_answer?.text ?? '—'}
+                  الإجابة الصحيحة:{' '}
+                  <MathText text={mistake.correct_answer?.text} fallback="—" />
                 </p>
               </div>
             ))}

@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Circle,
   FileQuestion,
+  FileText,
   ImageIcon,
   Import,
   Loader2,
@@ -19,6 +20,8 @@ import {
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
+import { MathText } from '@/components/library/math-text';
+import { OcrImportModal } from '@/components/library/ocr-import-modal';
 import {
   createGeneralExamQuestion,
   createLevelExamQuestion,
@@ -38,8 +41,14 @@ import {
   type McqQuestionPayload,
 } from '@/lib/course-management-api';
 import { apiErr } from '@/lib/library-errors';
+import {
+  buildPromptText,
+  normalizeOcrOptions,
+  primaryQuestionImage,
+} from '@/lib/ocr-question-utils';
 import * as ql from '@/lib/question-library-api';
 import type { QuestionListItem } from '@/types/question-library';
+import { OPTION_KEYS } from '@/types/question-library';
 
 type ExamTab = 'questions' | 'attempts';
 type ExamKind = 'level' | 'general';
@@ -88,6 +97,7 @@ export function LevelExamManagement({ kind = 'level' }: { kind?: ExamKind }) {
   const [deleteTarget, setDeleteTarget] = useState<LevelExamQuestion | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [ocrOpen, setOcrOpen] = useState(false);
 
   const backHref = courseId ? `/library/admin-courses/${courseId}` : '/library';
   const correctCount = useMemo(
@@ -267,6 +277,14 @@ export function LevelExamManagement({ kind = 'level' }: { kind?: ExamKind }) {
                 <Import className="h-4 w-4" />
                 استيراد من المكتبة
               </button>
+              <button
+                type="button"
+                onClick={() => setOcrOpen(true)}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-emerald-700"
+              >
+                <FileText className="h-4 w-4" />
+                استخراج من PDF/صورة
+              </button>
             </div>
             <button
               type="button"
@@ -345,6 +363,54 @@ export function LevelExamManagement({ kind = 'level' }: { kind?: ExamKind }) {
         />
       )}
 
+      {ocrOpen && (
+        <OcrImportModal
+          onClose={() => setOcrOpen(false)}
+          onDone={async () => {
+            await loadQuestions();
+            setOcrOpen(false);
+          }}
+          addButtonLabel="إضافة الأسئلة للامتحان"
+          introHint="راجع النتيجة وحدد الإجابات الناقصة قبل إضافتها للامتحان."
+          onAddQuestions={async (extractedQuestions, correctByIndex) => {
+            let position =
+              questions.length > 0
+                ? Math.max(...questions.map((q) => q.position ?? 0)) + 1
+                : 1;
+
+            for (const [index, question] of extractedQuestions.entries()) {
+              const correctKey = correctByIndex[index];
+              if (!correctKey) continue;
+
+              const correctIndex = OPTION_KEYS.indexOf(correctKey);
+              const primaryImage = primaryQuestionImage(question);
+              const payload: McqQuestionPayload = {
+                text: buildPromptText(question),
+                position,
+                ...(primaryImage?.image_blob
+                  ? {
+                      image_blob: primaryImage.image_blob,
+                      image_mime_type: primaryImage.image_mime_type ?? null,
+                    }
+                  : {}),
+                options: normalizeOcrOptions(question).map((option, optionIndex) => ({
+                  text: option.option_text,
+                  is_correct: optionIndex === correctIndex,
+                  position: optionIndex + 1,
+                })),
+              };
+
+              if (kind === 'general') {
+                await createGeneralExamQuestion(examId, payload);
+              } else {
+                await createLevelExamQuestion(examId, payload);
+              }
+              position += 1;
+            }
+          }}
+        />
+      )}
+
       {deleteTarget && (
         <ConfirmModal
           title="تأكيد حذف السؤال"
@@ -403,8 +469,8 @@ function QuestionCard({
       <div className="flex flex-row-reverse items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <p className="text-xs font-black text-blue-600">سؤال #{question.position}</p>
-          <p className="mt-2 whitespace-pre-wrap text-base font-black leading-7 text-zinc-950 dark:text-white">
-            {question.text}
+          <p className="mt-2 text-base font-black leading-8 text-zinc-950 dark:text-white">
+            <MathText text={question.text} fallback="(سؤال بدون نص)" />
           </p>
         </div>
         <div className="flex gap-2">
@@ -464,7 +530,9 @@ function QuestionCard({
               ) : (
                 <Circle className="h-4 w-4 shrink-0 text-zinc-400" />
               )}
-              <span className="min-w-0 flex-1 font-bold">{option.text}</span>
+              <span className="min-w-0 flex-1 font-bold">
+                <MathText text={option.text} fallback="(خيار فارغ)" />
+              </span>
             </button>
           ))}
       </div>
@@ -554,8 +622,9 @@ function QuestionFormModal({
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={4}
-            placeholder="نص السؤال"
+            placeholder="نص السؤال — يدعم LaTeX مثل $\\frac{1}{2}$ أو $3.14$"
             className={fieldClassName}
+            dir="auto"
           />
           <div className="grid gap-3 md:grid-cols-[1fr_8rem]">
             <input
@@ -608,8 +677,9 @@ function QuestionFormModal({
                   onChange={(e) =>
                     setOptions((prev) => prev.map((item, i) => (i === index ? e.target.value : item)))
                   }
-                  placeholder={`نص الاختيار ${index + 1}`}
+                  placeholder={`نص الاختيار ${index + 1} — مثال: $\\frac{3}{4}$`}
                   className={fieldClassName}
+                  dir="auto"
                 />
               </div>
             ))}
@@ -739,7 +809,10 @@ function ImportQuestionsModal({
                   )}
                   <span className="min-w-0 flex-1">
                     <span className="block line-clamp-2 font-bold text-zinc-900 dark:text-white">
-                      {question.prompt_text || 'سؤال بدون نص'}
+                      <MathText
+                        text={question.prompt_text}
+                        fallback="سؤال بدون نص"
+                      />
                     </span>
                     <span className="mt-1 block text-xs text-zinc-500">
                       {question.course.title} · {question.lesson.title}

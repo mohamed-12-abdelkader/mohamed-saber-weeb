@@ -554,6 +554,10 @@ function CourseEditorModal({
     if (clearImage) {
       payload.image_url = null;
     } else if (imageUrl.trim()) {
+      if (imageUrl.trim().startsWith('data:')) {
+        setErr('لا ترسل الصورة كنص base64 في رابط الصورة. اختر الصورة من الجهاز وسيتم ضغطها ورفعها تلقائيًا.');
+        return;
+      }
       payload.image_url = imageUrl.trim();
     }
 

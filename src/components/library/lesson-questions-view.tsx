@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import {
   CheckCircle2,
@@ -8,6 +8,7 @@ import {
   FileText,
   HelpCircle,
   ImagePlus,
+  Import,
   LayoutGrid,
   Loader2,
   ListChecks,
@@ -29,6 +30,7 @@ import {
   OptionsModal,
   type ModalState,
 } from '@/components/library/library-modals';
+import { ImportSelectedQuestionsModal } from '@/components/library/import-selected-questions-modal';
 import { apiErr } from '@/lib/library-errors';
 import {
   extractQuestionsFromFile,
@@ -255,10 +257,13 @@ export function LessonQuestionsView() {
   const [questions, setQuestions] = useState<QuestionListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [banner, setBanner] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
   const [modal, setModal] = useState<ModalState>({ type: 'none' });
   const [addTab, setAddTab] = useState<AddTab>('mcq');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isOcrModalOpen, setIsOcrModalOpen] = useState(false);
+  const [isExamImportOpen, setIsExamImportOpen] = useState(false);
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState<number[]>([]);
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
   /** أسئلة قيد حفظ الإجابة الصحيحة — يعطّل أزرار ذلك السؤال فقط */
   const [savingAnswerByQuestion, setSavingAnswerByQuestion] = useState<
@@ -297,6 +302,18 @@ export function LessonQuestionsView() {
             }
       )
     );
+  }
+
+  function toggleSelectedQuestion(questionId: number) {
+    setSelectedQuestionIds((prev) =>
+      prev.includes(questionId)
+        ? prev.filter((id) => id !== questionId)
+        : [...prev, questionId]
+    );
+  }
+
+  function clearSelectedQuestions() {
+    setSelectedQuestionIds([]);
   }
 
   useEffect(() => {
@@ -347,6 +364,12 @@ export function LessonQuestionsView() {
       cancelled = true;
     };
   }, [lessonId, courseId]);
+
+  useEffect(() => {
+    setSelectedQuestionIds((prev) =>
+      prev.filter((id) => questions.some((question) => question.question_id === id))
+    );
+  }, [questions]);
 
   async function afterMutation() {
     await refreshQuestionsQuiet();
@@ -474,6 +497,20 @@ export function LessonQuestionsView() {
             <PlusCircle className="h-4 w-4" />
             إضافة أسئلة
           </button>
+          <button
+            type="button"
+            onClick={() => setIsExamImportOpen(true)}
+            disabled={selectedQuestionIds.length === 0}
+            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-blue-600/25 transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Import className="h-4 w-4" />
+            إضافة المحدد لامتحان
+            {selectedQuestionIds.length > 0 && (
+              <span className="rounded-full bg-white/20 px-2 py-0.5 text-xs">
+                {selectedQuestionIds.length}
+              </span>
+            )}
+          </button>
         </div>
       )}
 
@@ -483,6 +520,15 @@ export function LessonQuestionsView() {
           role="alert"
         >
           {banner}
+        </div>
+      )}
+      {success && (
+        <div
+          className="mt-6 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-100"
+          role="status"
+        >
+          <CheckCircle2 className="h-4 w-4 shrink-0" />
+          {success}
         </div>
       )}
 
@@ -592,6 +638,20 @@ export function LessonQuestionsView() {
         </ModalBackdrop>
       )}
 
+      {isExamImportOpen && !invalidIds && (
+        <ImportSelectedQuestionsModal
+          courseId={courseId}
+          questionIds={selectedQuestionIds}
+          onClose={() => setIsExamImportOpen(false)}
+          onImported={(message) => {
+            setSuccess(message);
+            setBanner(null);
+            setIsExamImportOpen(false);
+            clearSelectedQuestions();
+          }}
+        />
+      )}
+
       <section className="mt-12">
         <h2 className="mb-6 flex items-center gap-2 text-xl font-bold text-zinc-900 dark:text-white">
           <LayoutGrid className="h-6 w-6 text-indigo-600" />
@@ -602,6 +662,39 @@ export function LessonQuestionsView() {
             </span>
           )}
         </h2>
+        {questions.length > 0 && (
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900">
+            <div className="flex flex-wrap items-center gap-2 text-sm text-zinc-600 dark:text-zinc-300">
+              <span className="font-bold text-zinc-900 dark:text-white">
+                المحدد: {selectedQuestionIds.length}
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedQuestionIds(questions.map((q) => q.question_id))}
+                className="rounded-lg bg-zinc-100 px-3 py-1 text-xs font-bold text-zinc-700 transition hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-200"
+              >
+                تحديد الكل
+              </button>
+              <button
+                type="button"
+                onClick={clearSelectedQuestions}
+                disabled={selectedQuestionIds.length === 0}
+                className="rounded-lg bg-zinc-100 px-3 py-1 text-xs font-bold text-zinc-700 transition hover:bg-zinc-200 disabled:opacity-50 dark:bg-zinc-800 dark:text-zinc-200"
+              >
+                إلغاء التحديد
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsExamImportOpen(true)}
+              disabled={selectedQuestionIds.length === 0}
+              className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Import className="h-4 w-4" />
+              إضافة المحدد لامتحان
+            </button>
+          </div>
+        )}
 
         {loading ? (
           <p className="py-16 text-center text-zinc-500">جاري التحميل…</p>
@@ -619,11 +712,16 @@ export function LessonQuestionsView() {
           <div className="grid gap-5">
             {questions.map((q) => {
               const imageSrc = questionImageSrc(q);
+              const selected = selectedQuestionIds.includes(q.question_id);
 
               return (
               <article
                 key={q.question_id}
-                className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm transition hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900"
+                className={`overflow-hidden rounded-2xl border bg-white shadow-sm transition hover:shadow-md dark:bg-zinc-900 ${
+                  selected
+                    ? 'border-blue-400 ring-2 ring-blue-500/20 dark:border-blue-700'
+                    : 'border-zinc-200 dark:border-zinc-800'
+                }`}
               >
                 {imageSrc ? (
                   <button
@@ -647,6 +745,21 @@ export function LessonQuestionsView() {
                 <div className="p-5">
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center gap-2">
+                    <label
+                      className={`inline-flex cursor-pointer items-center gap-2 rounded-full px-3 py-1 text-xs font-bold ${
+                        selected
+                          ? 'bg-blue-600 text-white'
+                          : 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => toggleSelectedQuestion(q.question_id)}
+                        className="h-3.5 w-3.5"
+                      />
+                      اختيار
+                    </label>
                     <span className="rounded-full bg-indigo-100 px-3 py-1 text-xs font-bold text-indigo-800 dark:bg-indigo-950 dark:text-indigo-100">
                       #{q.question_id}
                     </span>
