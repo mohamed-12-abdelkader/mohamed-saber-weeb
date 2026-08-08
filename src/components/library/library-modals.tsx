@@ -1,7 +1,7 @@
 'use client';
 
-import { ArrowDown, ArrowUp, CheckCircle2, Circle, ImagePlus, Trash2, UploadCloud, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { ArrowDown, ArrowUp, CheckCircle2, Circle, ClipboardPaste, ImagePlus, Trash2, UploadCloud, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { apiErr } from '@/lib/library-errors';
 import * as ql from '@/lib/question-library-api';
 import type { Course, Lesson, OptionKey, QuestionListItem } from '@/types/question-library';
@@ -390,6 +390,9 @@ export function BulkFormBody({
   const [metaPrompt, setMetaPrompt] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [pasteHint, setPasteHint] = useState<string | null>(null);
+  const dropZoneRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     return () => {
@@ -399,9 +402,19 @@ export function BulkFormBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function onPickFiles(nextFiles: FileList | null) {
-    if (!nextFiles?.length) return;
-    const sorted = Array.from(nextFiles).sort((a, b) =>
+  useEffect(() => {
+    dropZoneRef.current?.focus();
+  }, []);
+
+  function addImageFiles(list: File[]) {
+    const images = list.filter(
+      (file) =>
+        file.type.startsWith('image/') ||
+        /\.(png|jpe?g|webp|gif|avif|bmp|tiff?)$/i.test(file.name)
+    );
+    if (!images.length) return 0;
+
+    const sorted = [...images].sort((a, b) =>
       a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })
     );
     const incoming = sorted.map((file) => ({
@@ -410,7 +423,56 @@ export function BulkFormBody({
       file,
     }));
     setFiles((prev) => [...prev, ...incoming]);
+    setErr(null);
+    return incoming.length;
   }
+
+  function onPickFiles(nextFiles: FileList | null) {
+    if (!nextFiles?.length) return;
+    addImageFiles(Array.from(nextFiles));
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function filesFromClipboard(clipboardData: DataTransfer | null): File[] {
+    if (!clipboardData) return [];
+    const fromItems: File[] = [];
+    for (const item of Array.from(clipboardData.items ?? [])) {
+      if (!item.type.startsWith('image/')) continue;
+      const blob = item.getAsFile();
+      if (!blob) continue;
+      const ext = blob.type.split('/')[1] || 'png';
+      const name =
+        blob.name && blob.name !== 'image.png'
+          ? blob.name
+          : `لصق-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
+      fromItems.push(new File([blob], name, { type: blob.type || 'image/png' }));
+    }
+    if (fromItems.length) return fromItems;
+    return Array.from(clipboardData.files ?? []).filter((file) =>
+      file.type.startsWith('image/')
+    );
+  }
+
+  function handlePaste(e: React.ClipboardEvent | ClipboardEvent) {
+    const pasted = filesFromClipboard(e.clipboardData);
+    if (!pasted.length) return;
+    e.preventDefault();
+    const count = addImageFiles(pasted);
+    if (count > 0) {
+      setPasteHint(`تم لصق ${count} صورة من الحافظة.`);
+    }
+  }
+
+  useEffect(() => {
+    function onWindowPaste(e: ClipboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, [contenteditable="true"]')) return;
+      handlePaste(e);
+    }
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function moveFile(index: number, direction: 'up' | 'down') {
     setFiles((prev) => {
@@ -435,13 +497,14 @@ export function BulkFormBody({
       for (const f of prev) URL.revokeObjectURL(f.previewUrl);
       return [];
     });
+    setPasteHint(null);
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
     if (!files.length) {
-      setErr('اختر صورة واحدة على الأقل');
+      setErr('اختر أو الصق صورة واحدة على الأقل');
       return;
     }
     const arr = files.map((x) => x.file);
@@ -463,16 +526,27 @@ export function BulkFormBody({
   }
 
   return (
-    <form onSubmit={submit} className="space-y-5">
+    <form onSubmit={submit} className="space-y-5" onPaste={handlePaste}>
       <p className="rounded-xl bg-violet-50 px-4 py-3 text-sm text-violet-900 dark:bg-violet-950/30 dark:text-violet-100">
-        كل صورة تُنشئ سؤالًا مستقلًا. الحد الأقصى للصورة 5MB حسب الخادم.
+        كل صورة تُنشئ سؤالًا مستقلًا. يمكنك اختيار الصور من الجهاز أو لصقها (Ctrl+V). الحد الأقصى للصورة 5MB حسب الخادم.
       </p>
-      <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50/60 p-4 dark:border-zinc-700 dark:bg-zinc-900/40">
+
+      <div
+        ref={dropZoneRef}
+        tabIndex={0}
+        onPaste={handlePaste}
+        className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50/60 p-4 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-200 dark:border-zinc-700 dark:bg-zinc-900/40 dark:focus:ring-violet-900/40"
+      >
         <label className="text-sm font-medium">صور (متعدد)</label>
-        <label className="mt-2 flex cursor-pointer items-center justify-center gap-2 rounded-xl border border-zinc-300 bg-white px-4 py-3 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800">
-          <UploadCloud className="h-4 w-4" />
-          اختر الصور
+        <label className="mt-2 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-zinc-300 bg-white px-4 py-6 text-center text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800">
+          <UploadCloud className="h-6 w-6 text-violet-600" />
+          <span>اختر الصور أو الصق صورة منسوخة</span>
+          <span className="inline-flex items-center gap-1.5 text-xs font-normal text-zinc-500">
+            <ClipboardPaste className="h-3.5 w-3.5" />
+            Ctrl+V / Cmd+V داخل هذه المنطقة
+          </span>
           <input
+            ref={fileInputRef}
             type="file"
             accept="image/*"
             multiple
@@ -481,15 +555,20 @@ export function BulkFormBody({
           />
         </label>
         <p className="mt-2 text-xs text-zinc-500">
-          يمكنك اختيار الصور على دفعات، وستظهر هنا قبل الرفع.
+          يمكنك الإضافة على دفعات؛ الصور المختارة والملصوقة تظهر بالأسفل قبل الرفع.
         </p>
+        {pasteHint && (
+          <p className="mt-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+            {pasteHint}
+          </p>
+        )}
       </div>
 
       {files.length > 0 && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-              الصور المختارة ({files.length})
+              الصور الجاهزة للرفع ({files.length})
             </p>
             <button
               type="button"
@@ -512,7 +591,7 @@ export function BulkFormBody({
                 <img
                   src={item.previewUrl}
                   alt={item.file.name}
-                  className="h-28 w-full object-cover"
+                  className="h-36 w-full bg-zinc-100 object-contain dark:bg-zinc-950"
                 />
                 <div className="flex items-center justify-between gap-1 p-2">
                   <p className="min-w-0 flex-1 truncate text-xs text-zinc-600 dark:text-zinc-400">
@@ -542,7 +621,7 @@ export function BulkFormBody({
                 <button
                   type="button"
                   onClick={() => removeFile(item.id)}
-                  className="absolute end-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition group-hover:opacity-100"
+                  className="absolute end-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-black/70 text-white opacity-90 transition hover:bg-red-600 sm:opacity-0 sm:group-hover:opacity-100"
                   aria-label="إزالة الصورة"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
@@ -566,11 +645,11 @@ export function BulkFormBody({
       {err && <p className="text-sm text-red-600">{err}</p>}
       <button
         type="submit"
-        disabled={busy}
+        disabled={busy || files.length === 0}
         className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 py-2.5 font-medium text-white disabled:opacity-60"
       >
         <ImagePlus className="h-4 w-4" />
-        {busy ? 'جاري الرفع…' : 'رفع الصور'}
+        {busy ? 'جاري الرفع…' : `رفع الصور (${files.length})`}
       </button>
     </form>
   );

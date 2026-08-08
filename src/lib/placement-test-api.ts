@@ -48,7 +48,7 @@ export type PlacementChoicePayload = {
 };
 
 export type PlacementQuestionPayload = {
-  text: string;
+  text: string | null;
   points: number;
   position?: number;
   image_url?: string | null;
@@ -68,12 +68,13 @@ export type PlacementChoice = {
 export type PlacementQuestion = {
   id: number;
   test_id: number;
-  text: string;
+  text: string | null;
   points: number;
   position: number;
   image_url: string | null;
   image_blob?: string | null;
   image_mime_type?: string | null;
+  question_type?: string | null;
   choices: PlacementChoice[];
 };
 

@@ -89,9 +89,9 @@ export function isImageFile(file: File) {
 }
 
 export function selectedFilesLabel(files: File[]) {
-  if (files.length === 0) return 'اختر PDF واحد أو حتى 8 صور من الجهاز';
+  if (files.length === 0) return 'اختر PDF/صور أو الصق صورة من الحافظة';
   if (files.length === 1) return files[0].name;
-  return `${files.length} صور مختارة: ${files.map((file) => file.name).join('، ')}`;
+  return `${files.length} صور جاهزة للرفع`;
 }
 
 export function canSaveOcrQuestion(question: OcrExtractedQuestion) {

@@ -3,13 +3,15 @@
 import {
   CheckCircle2,
   Circle,
+  ClipboardPaste,
   FileText,
   Loader2,
   PlusCircle,
   Trash2,
   UploadCloud,
+  X,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { MathText } from '@/components/library/math-text';
 import { ModalBackdrop } from '@/components/library/library-modals';
 import { apiErr } from '@/lib/library-errors';
@@ -23,6 +25,78 @@ import {
 } from '@/lib/ocr-question-utils';
 import { extractQuestionsFromFile, type OcrExtractedQuestion } from '@/lib/ocr-api';
 import type { OptionKey } from '@/types/question-library';
+
+const MAX_FILES = 8;
+
+function sortFiles(files: File[]) {
+  return [...files].sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    })
+  );
+}
+
+function filesFromClipboard(clipboardData: DataTransfer | null): File[] {
+  if (!clipboardData) return [];
+  const fromItems: File[] = [];
+  for (const item of Array.from(clipboardData.items ?? [])) {
+    if (!item.type.startsWith('image/')) continue;
+    const blob = item.getAsFile();
+    if (!blob) continue;
+    const ext = blob.type.split('/')[1] || 'png';
+    const name =
+      blob.name && blob.name !== 'image.png'
+        ? blob.name
+        : `لصق-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
+    fromItems.push(new File([blob], name, { type: blob.type || 'image/png' }));
+  }
+  if (fromItems.length) return fromItems;
+
+  return Array.from(clipboardData.files ?? []).filter((file) => isImageFile(file));
+}
+
+function FilePreviewCard({
+  file,
+  previewUrl,
+  onRemove,
+}: {
+  file: File;
+  previewUrl?: string;
+  onRemove: () => void;
+}) {
+  const isPdf = isPdfFile(file);
+  return (
+    <div className="group relative overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
+      <div className="flex aspect-[4/3] items-center justify-center bg-zinc-100 dark:bg-zinc-950">
+        {previewUrl && !isPdf ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={previewUrl}
+            alt={file.name}
+            className="h-full w-full object-contain"
+          />
+        ) : (
+          <div className="flex flex-col items-center gap-2 px-3 text-center text-xs text-zinc-500">
+            <FileText className="h-8 w-8 text-emerald-600" />
+            <span>ملف PDF</span>
+          </div>
+        )}
+      </div>
+      <div className="truncate px-2 py-1.5 text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
+        {file.name}
+      </div>
+      <button
+        type="button"
+        onClick={onRemove}
+        className="absolute start-1.5 top-1.5 inline-flex h-7 w-7 items-center justify-center rounded-full bg-red-600 text-white shadow opacity-90 transition hover:bg-red-700"
+        title="إزالة"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
 
 export function OcrImportModal({
   onClose,
@@ -48,39 +122,123 @@ export function OcrImportModal({
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [pasteHint, setPasteHint] = useState<string | null>(null);
   const [result, setResult] = useState<Awaited<
     ReturnType<typeof extractQuestionsFromFile>
   > | null>(null);
   const [correctByIndex, setCorrectByIndex] = useState<
     Partial<Record<number, OptionKey>>
   >({});
+  const dropZoneRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  function pickFiles(nextFiles: FileList | null) {
-    const picked = nextFiles
-      ? Array.from(nextFiles).sort((a, b) =>
-          a.name.localeCompare(b.name, undefined, {
-            numeric: true,
-            sensitivity: 'base',
-          })
-        )
-      : [];
-    setFiles(picked);
+  const previewUrls = useMemo(() => {
+    return files.map((file) =>
+      isImageFile(file) && !isPdfFile(file) ? URL.createObjectURL(file) : undefined
+    );
+  }, [files]);
+
+  useEffect(() => {
+    return () => {
+      for (const url of previewUrls) {
+        if (url) URL.revokeObjectURL(url);
+      }
+    };
+  }, [previewUrls]);
+
+  useEffect(() => {
+    dropZoneRef.current?.focus();
+  }, []);
+
+  function resetExtractionState() {
     setResult(null);
     setCorrectByIndex({});
     setPageFrom('');
     setPageTo('');
+  }
+
+  function applyFiles(next: File[], mode: 'replace' | 'append' = 'replace') {
+    let merged = mode === 'append' ? [...files, ...next] : next;
+
+    const hasPdf = merged.some((file) => isPdfFile(file));
+    if (hasPdf && merged.length > 1) {
+      const onlyPdf = next.find((file) => isPdfFile(file));
+      if (onlyPdf && next.length === 1) {
+        merged = [onlyPdf];
+        setPasteHint('تم استبدال الملفات بملف PDF واحد.');
+      } else {
+        setErr('لا يمكن رفع PDF مع ملفات أخرى. ارفع PDF واحد فقط أو عدة صور.');
+        return;
+      }
+    }
+
+    if (merged.length > MAX_FILES) {
+      setErr(`الحد الأقصى هو ${MAX_FILES} ملفات.`);
+      merged = merged.slice(0, MAX_FILES);
+    }
+
+    const invalid = merged.some(
+      (file) => !isPdfFile(file) && !isImageFile(file)
+    );
+    if (invalid) {
+      setErr('الصيغ المدعومة: PDF أو صور فقط.');
+      return;
+    }
+
+    setFiles(sortFiles(merged));
+    resetExtractionState();
     setErr(null);
   }
+
+  function pickFiles(nextFiles: FileList | null) {
+    const picked = nextFiles ? Array.from(nextFiles) : [];
+    if (!picked.length) return;
+    const allImages = picked.every((file) => isImageFile(file) && !isPdfFile(file));
+    const currentAllImages =
+      files.length > 0 && files.every((file) => isImageFile(file) && !isPdfFile(file));
+    applyFiles(picked, allImages && currentAllImages ? 'append' : 'replace');
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function removeFileAt(index: number) {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+    resetExtractionState();
+    setErr(null);
+    setPasteHint(null);
+  }
+
+  function handlePaste(e: React.ClipboardEvent | ClipboardEvent) {
+    const pasted = filesFromClipboard(e.clipboardData);
+    if (!pasted.length) return;
+    e.preventDefault();
+    const currentAllImages =
+      files.length === 0 ||
+      files.every((file) => isImageFile(file) && !isPdfFile(file));
+    applyFiles(pasted, currentAllImages ? 'append' : 'replace');
+    setPasteHint(`تم لصق ${pasted.length} صورة من الحافظة.`);
+  }
+
+  useEffect(() => {
+    function onWindowPaste(e: ClipboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, [contenteditable="true"]')) return;
+      handlePaste(e);
+    }
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [files]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
+    setPasteHint(null);
     if (files.length === 0) {
-      setErr('اختر ملف PDF أو صورة واحدة على الأقل أولًا');
+      setErr('اختر أو الصق صورة/PDF أولًا');
       return;
     }
-    if (files.length > 8) {
-      setErr('الحد الأقصى هو 8 ملفات في طلب الاستخراج الواحد.');
+    if (files.length > MAX_FILES) {
+      setErr(`الحد الأقصى هو ${MAX_FILES} ملفات في طلب الاستخراج الواحد.`);
       return;
     }
     const pdfFiles = files.filter((item) => isPdfFile(item));
@@ -202,21 +360,29 @@ export function OcrImportModal({
     <ModalBackdrop title="استخراج أسئلة من PDF أو صور" onClose={onClose}>
       <form onSubmit={submit} className="space-y-5">
         <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm leading-7 text-emerald-950 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-100">
-          ارفع ملف PDF واحد أو عدة صور، وسيتم إرسال الطلب إلى خدمة OCR لاستخراج الأسئلة كـ
-          Markdown + LaTeX. {introHint}
+          ارفع ملف PDF واحد أو عدة صور، أو الصق صورة منسوخة (Ctrl+V)، وسيتم إرسال الطلب إلى خدمة
+          OCR لاستخراج الأسئلة كـ Markdown + LaTeX. {introHint}
         </div>
 
-        <div className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50/60 p-4 dark:border-zinc-700 dark:bg-zinc-900/40">
+        <div
+          ref={dropZoneRef}
+          tabIndex={0}
+          onPaste={handlePaste}
+          className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50/60 p-4 outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-200 dark:border-zinc-700 dark:bg-zinc-900/40 dark:focus:ring-emerald-900/40"
+        >
           <label className="text-sm font-medium text-zinc-800 dark:text-zinc-200">
             ملف PDF واحد أو حتى 8 صور
           </label>
+
           <label className="mt-2 flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-zinc-300 bg-white px-4 py-6 text-center text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800">
             <UploadCloud className="h-6 w-6 text-emerald-600" />
             <span className="max-w-full truncate">{selectedFilesLabel(files)}</span>
-            <span className="text-xs font-normal text-zinc-500">
-              PDF يرفع منفردًا. الصور يمكن رفعها معًا حتى 8 ملفات. الحد الأقصى 50MB لكل ملف.
+            <span className="inline-flex items-center gap-1.5 text-xs font-normal text-zinc-500">
+              <ClipboardPaste className="h-3.5 w-3.5" />
+              اختر من الجهاز أو الصق صورة (Ctrl+V / Cmd+V)
             </span>
             <input
+              ref={fileInputRef}
               type="file"
               accept="application/pdf,.pdf,image/png,image/jpeg,image/jpg,image/webp,image/gif,image/avif,image/bmp,image/tiff"
               multiple
@@ -224,18 +390,26 @@ export function OcrImportModal({
               className="hidden"
             />
           </label>
-          {files.length > 1 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {files.map((item) => (
-                <span
-                  key={`${item.name}-${item.size}-${item.lastModified}`}
-                  className="rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
-                >
-                  {item.name}
-                </span>
+
+          {pasteHint && (
+            <p className="mt-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+              {pasteHint}
+            </p>
+          )}
+
+          {files.length > 0 && (
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+              {files.map((item, index) => (
+                <FilePreviewCard
+                  key={`${item.name}-${item.size}-${item.lastModified}-${index}`}
+                  file={item}
+                  previewUrl={previewUrls[index]}
+                  onRemove={() => removeFileAt(index)}
+                />
               ))}
             </div>
           )}
+
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
             <div>
               <label className="text-xs font-semibold text-zinc-600 dark:text-zinc-400">
@@ -461,18 +635,9 @@ export function OcrImportModal({
                           ) : (
                             <Circle className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" />
                           )}
-                          <span className="font-mono text-xs opacity-70">
-                            {option.option_key}.
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <MathText
-                              text={option.option_text}
-                              fallback={
-                                <span className="italic text-red-500">
-                                  خيار فارغ
-                                </span>
-                              }
-                            />
+                          <span>
+                            <strong className="me-2">{option.option_key})</strong>
+                            <MathText text={option.option_text || '—'} />
                           </span>
                         </button>
                       );
@@ -482,18 +647,6 @@ export function OcrImportModal({
               );
             })}
           </div>
-
-          <details className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-sm dark:border-zinc-700 dark:bg-zinc-950">
-            <summary className="cursor-pointer font-semibold text-zinc-800 dark:text-zinc-100">
-              عرض response الخام
-            </summary>
-            <pre
-              dir="ltr"
-              className="mt-3 max-h-80 overflow-auto rounded-xl bg-zinc-950 p-4 text-xs leading-relaxed text-zinc-100"
-            >
-              {JSON.stringify(result, null, 2)}
-            </pre>
-          </details>
         </section>
       )}
     </ModalBackdrop>

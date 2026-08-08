@@ -113,11 +113,12 @@ export type LevelExamOption = {
 export type LevelExamQuestion = {
   id: number;
   level_exam_id?: number;
-  text: string;
+  text: string | null;
   image_url: string | null;
   image_blob?: string | null;
   image_mime_type?: string | null;
   position: number;
+  question_type?: string | null;
   options: LevelExamOption[];
 };
 
@@ -341,6 +342,28 @@ export async function updateLevelExamQuestionCorrectOption(
 ): Promise<void> {
   await api.patch(`${BASE}/level-exam-questions/${questionId}/correct-option`, {
     correct_option_id: correctOptionId,
+  });
+}
+
+/** رفع أسئلة IMAGE فقط — examId من course_level_exams */
+export async function createExamQuestionsFromImages(
+  examId: number,
+  images: File[]
+): Promise<void> {
+  const form = new FormData();
+  for (const image of images.slice(0, 10)) {
+    form.append('images[]', image);
+  }
+  await api.post(`/api/exams/${examId}/questions/images`, form);
+}
+
+/** تعيين الإجابة الصحيحة بحرف الخيار: A | B | C | D */
+export async function updateQuestionCorrectAnswer(
+  questionId: number,
+  correctAnswer: string
+): Promise<void> {
+  await api.patch(`/api/questions/${questionId}/correct-answer`, {
+    correctAnswer,
   });
 }
 

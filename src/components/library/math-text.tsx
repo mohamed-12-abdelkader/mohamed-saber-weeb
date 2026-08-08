@@ -66,15 +66,18 @@ function renderMath(value: string, displayMode: boolean) {
 export function MathText({
   text,
   fallback,
+  dir = 'rtl',
 }: {
   text: string | null | undefined;
   fallback?: React.ReactNode;
+  /** اتجاه عرض النص المختلط (عربي + رياضيات) */
+  dir?: 'rtl' | 'ltr' | 'auto';
 }) {
   const trimmed = text?.trim();
   if (!trimmed) return <>{fallback ?? null}</>;
 
   return (
-    <span dir="auto" style={{ unicodeBidi: 'plaintext' }}>
+    <span dir={dir} style={{ unicodeBidi: 'plaintext' }} className="inline-block max-w-full text-start">
       {splitMathText(trimmed).map((part, index) => {
         if (part.type === 'text') {
           return (
@@ -87,7 +90,7 @@ export function MathText({
         const html = renderMath(part.value, part.displayMode);
         if (!html) {
           return (
-            <span key={index} className="font-mono">
+            <span key={index} className="font-mono" dir="ltr">
               {part.value}
             </span>
           );
@@ -99,8 +102,8 @@ export function MathText({
             dir="ltr"
             className={
               part.displayMode
-                ? 'my-2 block overflow-x-auto'
-                : 'inline-block align-middle'
+                ? 'my-2 block overflow-x-auto text-start'
+                : 'mx-0.5 inline-block align-middle'
             }
             dangerouslySetInnerHTML={{ __html: html }}
           />

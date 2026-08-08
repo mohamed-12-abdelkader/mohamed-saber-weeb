@@ -18,7 +18,9 @@ import {
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
+import { SiteBlockedScreen } from '@/components/site-blocked-screen';
 import { clearSession, getToken, getUser, isAdmin } from '@/lib/auth-storage';
+import { SITE_BLOCKED } from '@/lib/site-config';
 
 const NAV = [
   {
@@ -164,6 +166,10 @@ export function LibraryShell({ children }: { children: React.ReactNode }) {
 
   if (!getToken()) {
     return null;
+  }
+
+  if (SITE_BLOCKED) {
+    return <SiteBlockedScreen />;
   }
 
   if (!admin) {

@@ -263,8 +263,36 @@ export function PlacementTestManagement() {
           onOcr={() => setOcrOpen(true)}
           onEdit={(question) => setQuestionModal({ mode: 'edit', question })}
           onDelete={(question) =>
-            setDeleteTarget({ type: 'question', id: question.id, title: question.text })
+            setDeleteTarget({
+              type: 'question',
+              id: question.id,
+              title: question.text?.trim() || `سؤال صورة #${question.position}`,
+            })
           }
+          onSetCorrect={async (question, choiceId) => {
+            try {
+              const sorted = question.choices
+                .slice()
+                .sort((a, b) => a.position - b.position);
+              await placement.updatePlacementQuestion(question.id, {
+                text: question.text,
+                points: question.points,
+                position: question.position,
+                image_url: question.image_url,
+                image_blob: question.image_blob ?? null,
+                image_mime_type: question.image_mime_type ?? null,
+                choices: sorted.map((choice) => ({
+                  text: choice.text,
+                  is_correct: choice.id === choiceId,
+                  position: choice.position,
+                })),
+              });
+              await loadQuestions(activeTest?.id);
+              setBanner(null);
+            } catch (e) {
+              setBanner(apiErr(e));
+            }
+          }}
         />
       ) : (
         <AttemptsPanel
@@ -558,6 +586,7 @@ function QuestionsPanel({
   onOcr,
   onEdit,
   onDelete,
+  onSetCorrect,
 }: {
   test: placement.PlacementTest | null;
   questions: placement.PlacementQuestion[];
@@ -568,15 +597,16 @@ function QuestionsPanel({
   onOcr: () => void;
   onEdit: (question: placement.PlacementQuestion) => void;
   onDelete: (question: placement.PlacementQuestion) => void;
+  onSetCorrect: (question: placement.PlacementQuestion, choiceId: number) => Promise<void>;
 }) {
   return (
-    <section className="mt-6 rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <section className="mt-6 rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900" dir="rtl">
       <SectionHeader
         icon={FileQuestion}
         title="بنك أسئلة اختبار تحديد المستوى"
-        hint="كل سؤال يحتاج اختيارين على الأقل وإجابة صحيحة واحدة."
+        hint="اضغط على أي اختيار لتعيينه كإجابة صحيحة مباشرة."
         action={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button type="button" onClick={onCreate} disabled={!test} className={primarySmallButtonClassName}>
               <Plus className="h-4 w-4" />
               إضافة سؤال
@@ -606,7 +636,7 @@ function QuestionsPanel({
       ) : loading ? (
         <LoadingState text="جاري تحميل الأسئلة..." />
       ) : questions.length === 0 ? (
-        <EmptyState text="لا توجد أسئلة بعد. أضف سؤالًا أو استورد من مكتبة الأسئلة." />
+        <EmptyState text="لا توجد أسئلة بعد. أضف سؤالًا نصيًا أو استورد من المكتبة." />
       ) : (
         <div className="mt-5 space-y-3">
           {questions.map((question) => (
@@ -615,6 +645,7 @@ function QuestionsPanel({
               question={question}
               onEdit={() => onEdit(question)}
               onDelete={() => onDelete(question)}
+              onSetCorrect={(choiceId) => onSetCorrect(question, choiceId)}
             />
           ))}
         </div>
@@ -627,62 +658,130 @@ function QuestionCard({
   question,
   onEdit,
   onDelete,
+  onSetCorrect,
 }: {
   question: placement.PlacementQuestion;
   onEdit: () => void;
   onDelete: () => void;
+  onSetCorrect: (choiceId: number) => Promise<void>;
 }) {
   const src = imageSrc(question);
+  const [busyChoiceId, setBusyChoiceId] = useState<number | null>(null);
+  const isImageOnly =
+    question.question_type === 'IMAGE' ||
+    (!question.text?.trim() && !!src);
+  const hasCorrect = question.choices.some((choice) => choice.is_correct);
+  const sortedChoices = question.choices
+    .slice()
+    .sort((a, b) => a.position - b.position);
+
+  async function setCorrect(choiceId: number) {
+    if (busyChoiceId != null) return;
+    setBusyChoiceId(choiceId);
+    try {
+      await onSetCorrect(choiceId);
+    } finally {
+      setBusyChoiceId(null);
+    }
+  }
+
   return (
-    <article className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4 text-right dark:border-zinc-800 dark:bg-zinc-950">
+    <article
+      dir="rtl"
+      className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4 text-right dark:border-zinc-800 dark:bg-zinc-950"
+    >
       <div className="flex items-start justify-between gap-3">
-        <div className="flex gap-2">
-          <button type="button" onClick={onEdit} className={iconButtonClassName}>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-xs font-black text-blue-600">
+              سؤال #{question.position} · {question.points} نقطة
+            </p>
+            {isImageOnly && (
+              <span className="rounded-full bg-sky-100 px-2.5 py-0.5 text-[11px] font-black text-sky-800 dark:bg-sky-950/50 dark:text-sky-200">
+                IMAGE
+              </span>
+            )}
+            {!hasCorrect && (
+              <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-black text-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                حدد الإجابة الصحيحة
+              </span>
+            )}
+          </div>
+          <div className="mt-2 text-base font-black leading-8 text-zinc-950 dark:text-white">
+            <MathText
+              text={question.text}
+              dir="rtl"
+              fallback={
+                isImageOnly ? (
+                  <span className="text-sm font-bold text-zinc-500">سؤال صورة — بدون نص</span>
+                ) : (
+                  '(سؤال بدون نص)'
+                )
+              }
+            />
+          </div>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <button type="button" onClick={onEdit} className={iconButtonClassName} title="تعديل">
             <Pencil className="h-4 w-4" />
           </button>
-          <button type="button" onClick={onDelete} className={dangerIconButtonClassName}>
+          <button type="button" onClick={onDelete} className={dangerIconButtonClassName} title="حذف">
             <Trash2 className="h-4 w-4" />
           </button>
         </div>
-        <div className="min-w-0">
-          <p className="text-xs font-black text-blue-600">سؤال #{question.position} · {question.points} نقطة</p>
-          <p className="mt-2 text-base font-black leading-8 text-zinc-950 dark:text-white">
-            <MathText text={question.text} fallback="(سؤال بدون نص)" />
-          </p>
-        </div>
       </div>
+
       {src ? (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={src} alt="صورة السؤال" className="mt-4 max-h-72 w-full rounded-2xl border border-zinc-200 object-contain dark:border-zinc-800" />
+        <img
+          src={src}
+          alt="صورة السؤال"
+          className="mt-4 max-h-72 w-full rounded-2xl border border-zinc-200 object-contain dark:border-zinc-800"
+        />
       ) : (
         <div className="mt-4 flex items-center justify-center gap-2 rounded-2xl border border-dashed border-zinc-300 py-6 text-sm text-zinc-400 dark:border-zinc-700">
           <ImageIcon className="h-4 w-4" />
           بدون صورة
         </div>
       )}
-      <div className="mt-4 grid gap-2 md:grid-cols-2">
-        {question.choices
-          .slice()
-          .sort((a, b) => a.position - b.position)
-          .map((choice) => (
-            <div
+
+      <p className="mt-4 text-xs font-bold text-zinc-500">
+        اضغط على الاختيار لتعيينه كإجابة صحيحة
+      </p>
+      <div className="mt-2 grid gap-2 md:grid-cols-2">
+        {sortedChoices.map((choice, index) => {
+          const busy = busyChoiceId === choice.id;
+          return (
+            <button
+              type="button"
               key={choice.id}
-              className={`flex items-start justify-between gap-3 rounded-2xl border px-4 py-3 ${
+              onClick={() => void setCorrect(choice.id)}
+              disabled={busyChoiceId != null}
+              className={`flex items-start gap-3 rounded-2xl border px-4 py-3 text-right transition disabled:opacity-60 ${
                 choice.is_correct
                   ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/25 dark:text-emerald-200'
-                  : 'border-zinc-200 bg-white text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200'
+                  : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
               }`}
             >
-              {choice.is_correct ? (
-                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+              {busy ? (
+                <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-amber-600" />
+              ) : choice.is_correct ? (
+                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
               ) : (
-                <Circle className="h-4 w-4 shrink-0 text-zinc-400" />
+                <Circle className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" />
               )}
               <span className="min-w-0 flex-1 font-bold">
-                <MathText text={choice.text} fallback="(خيار فارغ)" />
+                <span className="me-2 font-mono text-xs opacity-70">
+                  {OPTION_KEYS[index] ?? String.fromCharCode(65 + index)}.
+                </span>
+                {choice.text?.trim() &&
+                choice.text.trim() !== (OPTION_KEYS[index] ?? '') ? (
+                  <MathText text={choice.text} dir="rtl" />
+                ) : null}
               </span>
-            </div>
-          ))}
+            </button>
+          );
+        })}
       </div>
     </article>
   );
@@ -946,9 +1045,15 @@ function QuestionModal({
     sortedChoices?.map((choice) => choice.text) ?? ['', '', '', '']
   );
   const [correctIndex, setCorrectIndex] = useState(
-    Math.max(0, sortedChoices?.findIndex((choice) => choice.is_correct) ?? 0)
+    Math.max(
+      0,
+      sortedChoices?.findIndex((choice) => choice.is_correct) ?? 0
+    )
   );
   const [busy, setBusy] = useState(false);
+  const isImageQuestion =
+    editing?.question_type === 'IMAGE' ||
+    (!!(editing && !editing.text?.trim()) && !!(editing?.image_blob || editing?.image_url));
 
   function addChoice() {
     setChoices((prev) => [...prev, '']);
@@ -963,7 +1068,7 @@ function QuestionModal({
     e.preventDefault();
     const numericPoints = asNumber(points);
     const filledChoices = choices.map((choice) => choice.trim()).filter(Boolean);
-    if (!text.trim() || !numericPoints || numericPoints <= 0) {
+    if ((!isImageQuestion && !text.trim()) || !numericPoints || numericPoints <= 0) {
       onError('نص السؤال والنقاط مطلوبان');
       return;
     }
@@ -977,7 +1082,7 @@ function QuestionModal({
     }
 
     const payload: placement.PlacementQuestionPayload = {
-      text: text.trim(),
+      text: text.trim() || null,
       points: numericPoints,
       position: asOptionalNumber(position),
       image_url: imageUrl.trim() || null,
@@ -1011,9 +1116,13 @@ function QuestionModal({
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={4}
-            placeholder="نص السؤال — يدعم LaTeX مثل $\\frac{1}{2}$ أو $3.14$"
-            className={fieldClassName}
-            dir="auto"
+            placeholder={
+              isImageQuestion
+                ? 'سؤال صورة — النص اختياري (يمكن تركه فارغًا)'
+                : 'نص السؤال — يدعم LaTeX مثل $\\frac{1}{2}$ أو $x^2$'
+            }
+            className={`${fieldClassName} text-right`}
+            dir="rtl"
           />
           <div className="grid gap-3 md:grid-cols-3">
             <input type="number" min={0.1} step="0.1" value={points} onChange={(e) => setPoints(e.target.value)} placeholder="points" className={fieldClassName} />

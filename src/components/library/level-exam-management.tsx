@@ -19,10 +19,11 @@ import {
 } from 'lucide-react';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { MathText } from '@/components/library/math-text';
 import { OcrImportModal } from '@/components/library/ocr-import-modal';
 import {
+  createExamQuestionsFromImages,
   createGeneralExamQuestion,
   createLevelExamQuestion,
   deleteGeneralExamQuestion,
@@ -35,7 +36,7 @@ import {
   importLevelExamQuestionsFromLibrary,
   updateGeneralExamQuestion,
   updateLevelExamQuestion,
-  updateLevelExamQuestionCorrectOption,
+  updateQuestionCorrectAnswer,
   type LevelExamAttempt,
   type LevelExamQuestion,
   type McqQuestionPayload,
@@ -98,6 +99,7 @@ export function LevelExamManagement({ kind = 'level' }: { kind?: ExamKind }) {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [ocrOpen, setOcrOpen] = useState(false);
+  const [imageQuestionsOpen, setImageQuestionsOpen] = useState(false);
 
   const backHref = courseId ? `/library/admin-courses/${courseId}` : '/library';
   const correctCount = useMemo(
@@ -158,26 +160,15 @@ export function LevelExamManagement({ kind = 'level' }: { kind?: ExamKind }) {
   }
 
   async function updateCorrectOption(question: LevelExamQuestion, optionId: number) {
-    if (kind === 'level') {
-      await updateLevelExamQuestionCorrectOption(question.id, optionId);
-      return;
+    const sorted = question.options
+      .slice()
+      .sort((a, b) => a.position - b.position);
+    const index = sorted.findIndex((option) => option.id === optionId);
+    const correctAnswer = OPTION_KEYS[index];
+    if (!correctAnswer) {
+      throw new Error('تعذر تحديد حرف الإجابة الصحيحة');
     }
-
-    await updateGeneralExamQuestion(question.id, {
-      text: question.text,
-      image_url: question.image_url,
-      image_blob: question.image_blob,
-      image_mime_type: question.image_mime_type,
-      position: question.position,
-      options: question.options
-        .slice()
-        .sort((a, b) => a.position - b.position)
-        .map((option) => ({
-          text: option.text,
-          position: option.position,
-          is_correct: option.id === optionId,
-        })),
-    });
+    await updateQuestionCorrectAnswer(question.id, correctAnswer);
   }
 
   useEffect(() => {
@@ -285,6 +276,16 @@ export function LevelExamManagement({ kind = 'level' }: { kind?: ExamKind }) {
                 <FileText className="h-4 w-4" />
                 استخراج من PDF/صورة
               </button>
+              {kind === 'level' && (
+                <button
+                  type="button"
+                  onClick={() => setImageQuestionsOpen(true)}
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-sky-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-sky-700"
+                >
+                  <ImageIcon className="h-4 w-4" />
+                  أسئلة كصور
+                </button>
+              )}
             </div>
             <button
               type="button"
@@ -411,6 +412,18 @@ export function LevelExamManagement({ kind = 'level' }: { kind?: ExamKind }) {
         />
       )}
 
+      {imageQuestionsOpen && kind === 'level' && (
+        <ImageQuestionsModal
+          examId={examId}
+          onClose={() => setImageQuestionsOpen(false)}
+          onSaved={async () => {
+            await loadQuestions();
+            setImageQuestionsOpen(false);
+          }}
+          onError={setBanner}
+        />
+      )}
+
       {deleteTarget && (
         <ConfirmModal
           title="تأكيد حذف السؤال"
@@ -451,6 +464,13 @@ function QuestionCard({
 }) {
   const [correctBusyId, setCorrectBusyId] = useState<number | null>(null);
   const imageSrc = questionImageSrc(question);
+  const sortedOptions = question.options
+    .slice()
+    .sort((a, b) => a.position - b.position);
+  const isImageOnly =
+    question.question_type === 'IMAGE' ||
+    (!question.text?.trim() && !!imageSrc);
+  const hasCorrect = question.options.some((option) => option.is_correct);
 
   async function setCorrect(optionId: number) {
     setCorrectBusyId(optionId);
@@ -465,15 +485,40 @@ function QuestionCard({
   }
 
   return (
-    <article className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4 text-right dark:border-zinc-800 dark:bg-zinc-950">
-      <div className="flex flex-row-reverse items-start justify-between gap-3">
+    <article
+      dir="rtl"
+      className="rounded-3xl border border-zinc-200 bg-zinc-50 p-4 text-right dark:border-zinc-800 dark:bg-zinc-950"
+    >
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="text-xs font-black text-blue-600">سؤال #{question.position}</p>
-          <p className="mt-2 text-base font-black leading-8 text-zinc-950 dark:text-white">
-            <MathText text={question.text} fallback="(سؤال بدون نص)" />
-          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-xs font-black text-blue-600">سؤال #{question.position}</p>
+            {isImageOnly && (
+              <span className="rounded-full bg-sky-100 px-2.5 py-0.5 text-[11px] font-black text-sky-800 dark:bg-sky-950/50 dark:text-sky-200">
+                IMAGE
+              </span>
+            )}
+            {!hasCorrect && (
+              <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-black text-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                حدد الإجابة الصحيحة
+              </span>
+            )}
+          </div>
+          <div className="mt-2 text-base font-black leading-8 text-zinc-950 dark:text-white">
+            <MathText
+              text={question.text}
+              dir="rtl"
+              fallback={
+                isImageOnly ? (
+                  <span className="text-sm font-bold text-zinc-500">سؤال صورة — بدون نص</span>
+                ) : (
+                  '(سؤال بدون نص)'
+                )
+              }
+            />
+          </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex shrink-0 gap-2">
           <button
             type="button"
             onClick={onEdit}
@@ -507,36 +552,190 @@ function QuestionCard({
         </div>
       )}
 
-      <div className="mt-4 grid gap-2 md:grid-cols-2">
-        {question.options
-          .slice()
-          .sort((a, b) => a.position - b.position)
-          .map((option) => (
-            <button
-              type="button"
-              key={option.id}
-              onClick={() => setCorrect(option.id)}
-              disabled={correctBusyId != null}
-              className={`flex items-start justify-between gap-3 rounded-2xl border px-4 py-3 text-right transition disabled:opacity-60 ${
-                option.is_correct
-                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/25 dark:text-emerald-200'
-                  : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
-              }`}
-            >
-              {correctBusyId === option.id ? (
-                <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
-              ) : option.is_correct ? (
-                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
-              ) : (
-                <Circle className="h-4 w-4 shrink-0 text-zinc-400" />
-              )}
-              <span className="min-w-0 flex-1 font-bold">
-                <MathText text={option.text} fallback="(خيار فارغ)" />
+      <p className="mt-4 text-xs font-bold text-zinc-500">
+        اضغط على الاختيار لتعيين الإجابة الصحيحة
+      </p>
+      <div className="mt-2 grid gap-2 md:grid-cols-2">
+        {sortedOptions.map((option, index) => (
+          <button
+            type="button"
+            key={option.id}
+            onClick={() => setCorrect(option.id)}
+            disabled={correctBusyId != null}
+            className={`flex items-start gap-3 rounded-2xl border px-4 py-3 text-right transition disabled:opacity-60 ${
+              option.is_correct
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/25 dark:text-emerald-200'
+                : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800'
+            }`}
+          >
+            {correctBusyId === option.id ? (
+              <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin" />
+            ) : option.is_correct ? (
+              <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+            ) : (
+              <Circle className="mt-0.5 h-4 w-4 shrink-0 text-zinc-400" />
+            )}
+            <span className="min-w-0 flex-1 font-bold">
+              <span className="me-2 font-mono text-xs opacity-70">
+                {OPTION_KEYS[index] ?? String.fromCharCode(65 + index)}.
               </span>
-            </button>
-          ))}
+              {option.text?.trim() &&
+              option.text.trim() !== (OPTION_KEYS[index] ?? '') ? (
+                <MathText text={option.text} dir="rtl" />
+              ) : null}
+            </span>
+          </button>
+        ))}
       </div>
     </article>
+  );
+}
+
+function ImageQuestionsModal({
+  examId,
+  onClose,
+  onSaved,
+  onError,
+}: {
+  examId: number;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [files, setFiles] = useState<File[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const previewUrls = useMemo(
+    () => files.map((file) => URL.createObjectURL(file)),
+    [files]
+  );
+
+  useEffect(() => {
+    return () => {
+      for (const url of previewUrls) URL.revokeObjectURL(url);
+    };
+  }, [previewUrls]);
+
+  function addFiles(list: FileList | File[] | null) {
+    if (!list) return;
+    const next = Array.from(list).filter((file) => file.type.startsWith('image/'));
+    if (!next.length) {
+      setLocalError('اختر صورًا فقط.');
+      return;
+    }
+    setFiles((prev) => [...prev, ...next].slice(0, 10));
+    setLocalError(null);
+    if (inputRef.current) inputRef.current.value = '';
+  }
+
+  function handlePaste(e: React.ClipboardEvent) {
+    const images: File[] = [];
+    for (const item of Array.from(e.clipboardData.items)) {
+      if (!item.type.startsWith('image/')) continue;
+      const blob = item.getAsFile();
+      if (!blob) continue;
+      const ext = blob.type.split('/')[1] || 'png';
+      images.push(
+        new File([blob], `لصق-${Date.now()}-${images.length}.${ext}`, {
+          type: blob.type,
+        })
+      );
+    }
+    if (!images.length) return;
+    e.preventDefault();
+    addFiles(images);
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (files.length === 0) {
+      setLocalError('أضف صورة واحدة على الأقل (حتى 10 صور).');
+      return;
+    }
+    setBusy(true);
+    setLocalError(null);
+    try {
+      await createExamQuestionsFromImages(examId, files);
+      await onSaved();
+    } catch (err) {
+      const message = apiErr(err);
+      setLocalError(message);
+      onError(message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="إضافة أسئلة كصور فقط" onClose={onClose} maxWidth="max-w-3xl">
+      <form onSubmit={submit} onPaste={handlePaste} className="space-y-4" dir="rtl">
+        <div className="rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-sm leading-7 text-sky-950 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
+          يُرفع عبر <code className="text-xs">POST /api/exams/{'{examId}'}/questions/images</code>{' '}
+          بحقل <code className="text-xs">images[]</code>. كل صورة = سؤال IMAGE بدون نص، واختيارات
+          A–D. بعد الرفع عيّن الإجابة بـ{' '}
+          <code className="text-xs">PATCH /api/questions/:id/correct-answer</code> بالضغط على
+          الاختيار.
+        </div>
+
+        <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-4 py-8 text-center text-sm font-bold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200">
+          <UploadCloud className="h-7 w-7 text-sky-600" />
+          <span>اختر حتى 10 صور أو الصق صورة (Ctrl+V)</span>
+          <span className="text-xs font-medium text-zinc-500">
+            {files.length === 0 ? 'لم يتم اختيار صور بعد' : `${files.length} / 10 صور`}
+          </span>
+          <input
+            ref={inputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            className="hidden"
+            onChange={(e) => addFiles(e.target.files)}
+          />
+        </label>
+
+        {files.length > 0 && (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+            {files.map((file, index) => (
+              <div
+                key={`${file.name}-${file.size}-${index}`}
+                className="relative overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900"
+              >
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={previewUrls[index]}
+                  alt={file.name}
+                  className="aspect-[4/3] w-full bg-zinc-100 object-contain dark:bg-zinc-950"
+                />
+                <button
+                  type="button"
+                  onClick={() => setFiles((prev) => prev.filter((_, i) => i !== index))}
+                  className="absolute start-1.5 top-1.5 inline-flex h-7 w-7 items-center justify-center rounded-full bg-red-600 text-white"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {localError && (
+          <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
+            {localError}
+          </p>
+        )}
+
+        <button
+          type="submit"
+          disabled={busy || files.length === 0}
+          className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-sky-600 py-3 text-sm font-black text-white transition hover:bg-sky-700 disabled:opacity-60"
+        >
+          {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+          {busy ? 'جاري الرفع…' : `رفع ${files.length || ''} سؤال صورة`}
+        </button>
+      </form>
+    </Modal>
   );
 }
 
@@ -568,10 +767,13 @@ function QuestionFormModal({
     Math.max(0, sortedOptions?.findIndex((option) => option.is_correct) ?? 0)
   );
   const [busy, setBusy] = useState(false);
+  const isImageQuestion =
+    editing?.question_type === 'IMAGE' ||
+    (!!(editing && !editing.text?.trim()) && !!(editing.image_blob || editing.image_url));
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!text.trim()) {
+    if (!isImageQuestion && !text.trim()) {
       onError('نص السؤال مطلوب');
       return;
     }
