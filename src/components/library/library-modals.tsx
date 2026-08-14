@@ -393,6 +393,7 @@ export function BulkFormBody({
   const [pasteHint, setPasteHint] = useState<string | null>(null);
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const pasteLockRef = useRef(0);
 
   useEffect(() => {
     return () => {
@@ -436,24 +437,30 @@ export function BulkFormBody({
   function filesFromClipboard(clipboardData: DataTransfer | null): File[] {
     if (!clipboardData) return [];
     const fromItems: File[] = [];
+    const seen = new Set<string>();
+    const now = Date.now();
     for (const item of Array.from(clipboardData.items ?? [])) {
       if (!item.type.startsWith('image/')) continue;
       const blob = item.getAsFile();
       if (!blob) continue;
+      const fingerprint = `${blob.type}:${blob.size}`;
+      if (seen.has(fingerprint)) continue;
+      seen.add(fingerprint);
       const ext = blob.type.split('/')[1] || 'png';
       const name =
         blob.name && blob.name !== 'image.png'
           ? blob.name
-          : `لصق-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
+          : `لصق-${now}-${fromItems.length}.${ext}`;
       fromItems.push(new File([blob], name, { type: blob.type || 'image/png' }));
     }
-    if (fromItems.length) return fromItems;
-    return Array.from(clipboardData.files ?? []).filter((file) =>
-      file.type.startsWith('image/')
-    );
+    return fromItems;
   }
 
-  function handlePaste(e: React.ClipboardEvent | ClipboardEvent) {
+  function handlePaste(e: ClipboardEvent) {
+    const now = Date.now();
+    if (now - pasteLockRef.current < 400) return;
+    pasteLockRef.current = now;
+
     const pasted = filesFromClipboard(e.clipboardData);
     if (!pasted.length) return;
     e.preventDefault();
@@ -526,7 +533,7 @@ export function BulkFormBody({
   }
 
   return (
-    <form onSubmit={submit} className="space-y-5" onPaste={handlePaste}>
+    <form onSubmit={submit} className="space-y-5">
       <p className="rounded-xl bg-violet-50 px-4 py-3 text-sm text-violet-900 dark:bg-violet-950/30 dark:text-violet-100">
         كل صورة تُنشئ سؤالًا مستقلًا. يمكنك اختيار الصور من الجهاز أو لصقها (Ctrl+V). الحد الأقصى للصورة 5MB حسب الخادم.
       </p>
@@ -534,7 +541,6 @@ export function BulkFormBody({
       <div
         ref={dropZoneRef}
         tabIndex={0}
-        onPaste={handlePaste}
         className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50/60 p-4 outline-none focus:border-violet-400 focus:ring-2 focus:ring-violet-200 dark:border-zinc-700 dark:bg-zinc-900/40 dark:focus:ring-violet-900/40"
       >
         <label className="text-sm font-medium">صور (متعدد)</label>

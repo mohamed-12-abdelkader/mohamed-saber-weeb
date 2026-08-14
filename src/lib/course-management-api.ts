@@ -94,12 +94,21 @@ export type McqOptionPayload = {
 };
 
 export type McqQuestionPayload = {
-  text: string;
+  text?: string | null;
   image_url?: string | null;
   image_blob?: string | null;
   image_mime_type?: string | null;
   position?: number;
-  options: McqOptionPayload[];
+  options?: McqOptionPayload[];
+  /** لسؤال صورة فقط بدون نص/options — السيرفر يضيف أ/ب/ج/د */
+  correct_option_key?: string;
+};
+
+export type LevelExamImageOnlyPayload = {
+  correct_option_key: string;
+  image_blob?: string;
+  image_mime_type?: string;
+  position?: number;
 };
 
 export type LevelExamOption = {
@@ -163,7 +172,10 @@ export type LevelExamPayload = {
   questions_per_attempt?: number | null;
 };
 
-function questionBody(payload: McqQuestionPayload, image?: File | null) {
+function questionBody(
+  payload: McqQuestionPayload | LevelExamImageOnlyPayload,
+  image?: File | null
+) {
   if (!image) return payload;
   const form = new FormData();
   form.append('data', JSON.stringify(payload));
@@ -316,6 +328,34 @@ export async function createLevelExamQuestion(
   );
 }
 
+/**
+ * سؤال صورة فقط: بدون نص وبدون options يدويًا.
+ * multipart: data={"correct_option_key":"ب"} + image=@file
+ * أو JSON: { correct_option_key, image_blob }
+ */
+export async function createLevelExamImageOnlyQuestion(
+  examId: number,
+  correctOptionKey: string,
+  image: File,
+  extras?: { position?: number }
+): Promise<void> {
+  const payload: LevelExamImageOnlyPayload = {
+    correct_option_key: correctOptionKey,
+    ...(extras?.position != null ? { position: extras.position } : {}),
+  };
+  await api.post(
+    `${BASE}/level-exams/${examId}/questions`,
+    questionBody(payload, image)
+  );
+}
+
+export async function createLevelExamImageOnlyQuestionFromBlob(
+  examId: number,
+  payload: LevelExamImageOnlyPayload & { image_blob: string }
+): Promise<void> {
+  await api.post(`${BASE}/level-exams/${examId}/questions`, payload);
+}
+
 export async function fetchLevelExamQuestions(
   examId: number
 ): Promise<LevelExamQuestion[]> {
@@ -395,8 +435,8 @@ export async function createGeneralExam(
   courseId: number,
   payload: {
     title: string;
-    is_final: boolean;
-    pass_percentage?: number;
+    duration: number;
+    passing_percentage: number;
     is_active: boolean;
   }
 ): Promise<CourseGeneralExam> {
@@ -416,6 +456,46 @@ export async function createGeneralExamQuestion(
     `${BASE}/general-exams/${examId}/questions`,
     questionBody(payload, image)
   );
+}
+
+/**
+ * سؤال صورة فقط للامتحان العام: بدون نص وبدون options يدويًا.
+ * multipart: data={"correct_option_key":"ب"} + image=@file
+ */
+export async function createGeneralExamImageOnlyQuestion(
+  examId: number,
+  correctOptionKey: string,
+  image: File,
+  extras?: { position?: number }
+): Promise<void> {
+  const payload: LevelExamImageOnlyPayload = {
+    correct_option_key: correctOptionKey,
+    ...(extras?.position != null ? { position: extras.position } : {}),
+  };
+  await api.post(
+    `${BASE}/general-exams/${examId}/questions`,
+    questionBody(payload, image)
+  );
+}
+
+/** رفع أسئلة صورة فقط بالجملة — كل صورة = سؤال + خيارات أ/ب/ج/د */
+export async function createGeneralExamImageOnlyQuestionsBulk(
+  examId: number,
+  images: File[],
+  correctOptionKey?: string
+): Promise<{ count?: number }> {
+  const form = new FormData();
+  if (correctOptionKey) {
+    form.append('data', JSON.stringify({ correct_option_key: correctOptionKey }));
+  }
+  for (const image of images) {
+    form.append('images', image);
+  }
+  const { data } = await api.post<{ count?: number }>(
+    `${BASE}/general-exams/${examId}/questions/images`,
+    form
+  );
+  return data;
 }
 
 export async function fetchGeneralExamQuestions(

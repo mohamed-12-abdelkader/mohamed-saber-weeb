@@ -23,7 +23,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { MathText } from '@/components/library/math-text';
 import { OcrImportModal } from '@/components/library/ocr-import-modal';
 import {
-  createExamQuestionsFromImages,
+  createGeneralExamImageOnlyQuestion,
+  createGeneralExamImageOnlyQuestionsBulk,
+  createLevelExamImageOnlyQuestion,
   createGeneralExamQuestion,
   createLevelExamQuestion,
   deleteGeneralExamQuestion,
@@ -53,6 +55,9 @@ import { OPTION_KEYS } from '@/types/question-library';
 
 type ExamTab = 'questions' | 'attempts';
 type ExamKind = 'level' | 'general';
+
+const ARABIC_OPTION_KEYS = ['أ', 'ب', 'ج', 'د'] as const;
+type ArabicOptionKey = (typeof ARABIC_OPTION_KEYS)[number];
 
 function asOptionalNumber(value: string): number | undefined {
   const trimmed = value.trim();
@@ -276,16 +281,14 @@ export function LevelExamManagement({ kind = 'level' }: { kind?: ExamKind }) {
                 <FileText className="h-4 w-4" />
                 استخراج من PDF/صورة
               </button>
-              {kind === 'level' && (
-                <button
-                  type="button"
-                  onClick={() => setImageQuestionsOpen(true)}
-                  className="inline-flex items-center justify-center gap-2 rounded-2xl bg-sky-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-sky-700"
-                >
-                  <ImageIcon className="h-4 w-4" />
-                  أسئلة كصور
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => setImageQuestionsOpen(true)}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-sky-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-sky-700"
+              >
+                <ImageIcon className="h-4 w-4" />
+                أسئلة كصور
+              </button>
             </div>
             <button
               type="button"
@@ -412,9 +415,10 @@ export function LevelExamManagement({ kind = 'level' }: { kind?: ExamKind }) {
         />
       )}
 
-      {imageQuestionsOpen && kind === 'level' && (
+      {imageQuestionsOpen && (
         <ImageQuestionsModal
           examId={examId}
+          kind={kind}
           onClose={() => setImageQuestionsOpen(false)}
           onSaved={async () => {
             await loadQuestions();
@@ -593,30 +597,39 @@ function QuestionCard({
 
 function ImageQuestionsModal({
   examId,
+  kind,
   onClose,
   onSaved,
   onError,
 }: {
   examId: number;
+  kind: ExamKind;
   onClose: () => void;
   onSaved: () => Promise<void>;
   onError: (message: string) => void;
 }) {
-  const [files, setFiles] = useState<File[]>([]);
+  type Draft = {
+    id: string;
+    file: File;
+    previewUrl: string;
+    correctKey: ArabicOptionKey;
+  };
+
+  const [items, setItems] = useState<Draft[]>([]);
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [pasteHint, setPasteHint] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  const previewUrls = useMemo(
-    () => files.map((file) => URL.createObjectURL(file)),
-    [files]
-  );
+  const zoneRef = useRef<HTMLDivElement>(null);
+  const pasteLockRef = useRef(0);
 
   useEffect(() => {
+    zoneRef.current?.focus();
     return () => {
-      for (const url of previewUrls) URL.revokeObjectURL(url);
+      for (const item of items) URL.revokeObjectURL(item.previewUrl);
     };
-  }, [previewUrls]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function addFiles(list: FileList | File[] | null) {
     if (!list) return;
@@ -625,20 +638,37 @@ function ImageQuestionsModal({
       setLocalError('اختر صورًا فقط.');
       return;
     }
-    setFiles((prev) => [...prev, ...next].slice(0, 10));
+    setItems((prev) => {
+      const room = Math.max(0, 10 - prev.length);
+      const incoming = next.slice(0, room).map((file) => ({
+        id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+        correctKey: 'أ' as ArabicOptionKey,
+      }));
+      return [...prev, ...incoming];
+    });
     setLocalError(null);
     if (inputRef.current) inputRef.current.value = '';
   }
 
-  function handlePaste(e: React.ClipboardEvent) {
+  function handlePaste(e: ClipboardEvent) {
+    const now = Date.now();
+    if (now - pasteLockRef.current < 400) return;
+    pasteLockRef.current = now;
+
     const images: File[] = [];
-    for (const item of Array.from(e.clipboardData.items)) {
+    const seen = new Set<string>();
+    for (const item of Array.from(e.clipboardData?.items ?? [])) {
       if (!item.type.startsWith('image/')) continue;
       const blob = item.getAsFile();
       if (!blob) continue;
+      const fingerprint = `${blob.type}:${blob.size}`;
+      if (seen.has(fingerprint)) continue;
+      seen.add(fingerprint);
       const ext = blob.type.split('/')[1] || 'png';
       images.push(
-        new File([blob], `لصق-${Date.now()}-${images.length}.${ext}`, {
+        new File([blob], `لصق-${now}-${images.length}.${ext}`, {
           type: blob.type,
         })
       );
@@ -646,18 +676,60 @@ function ImageQuestionsModal({
     if (!images.length) return;
     e.preventDefault();
     addFiles(images);
+    setPasteHint(`تم لصق ${images.length} صورة.`);
+  }
+
+  useEffect(() => {
+    function onWindowPaste(e: ClipboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, [contenteditable="true"]')) return;
+      handlePaste(e);
+    }
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function removeItem(id: string) {
+    setItems((prev) => {
+      const target = prev.find((item) => item.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((item) => item.id !== id);
+    });
+  }
+
+  function setCorrectKey(id: string, correctKey: ArabicOptionKey) {
+    setItems((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, correctKey } : item))
+    );
   }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (files.length === 0) {
-      setLocalError('أضف صورة واحدة على الأقل (حتى 10 صور).');
+    if (items.length === 0) {
+      setLocalError('أضف صورة واحدة على الأقل وحدد الإجابة الصحيحة لكل صورة.');
       return;
     }
     setBusy(true);
     setLocalError(null);
     try {
-      await createExamQuestionsFromImages(examId, files);
+      if (kind === 'general') {
+        const byCorrectKey = new Map<string, File[]>();
+        for (const item of items) {
+          const group = byCorrectKey.get(item.correctKey) ?? [];
+          group.push(item.file);
+          byCorrectKey.set(item.correctKey, group);
+        }
+        for (const [correctKey, files] of byCorrectKey) {
+          await createGeneralExamImageOnlyQuestionsBulk(examId, files, correctKey);
+        }
+      } else {
+        for (const item of items) {
+          await createLevelExamImageOnlyQuestion(examId, item.correctKey, item.file);
+        }
+      }
+      for (const item of items) URL.revokeObjectURL(item.previewUrl);
+      setItems([]);
       await onSaved();
     } catch (err) {
       const message = apiErr(err);
@@ -669,51 +741,105 @@ function ImageQuestionsModal({
   }
 
   return (
-    <Modal title="إضافة أسئلة كصور فقط" onClose={onClose} maxWidth="max-w-3xl">
-      <form onSubmit={submit} onPaste={handlePaste} className="space-y-4" dir="rtl">
+    <Modal title="إضافة أسئلة صورة فقط" onClose={onClose} maxWidth="max-w-3xl">
+      <form onSubmit={submit} className="space-y-4" dir="rtl">
         <div className="rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-sm leading-7 text-sky-950 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
-          يُرفع عبر <code className="text-xs">POST /api/exams/{'{examId}'}/questions/images</code>{' '}
-          بحقل <code className="text-xs">images[]</code>. كل صورة = سؤال IMAGE بدون نص، واختيارات
-          A–D. بعد الرفع عيّن الإجابة بـ{' '}
-          <code className="text-xs">PATCH /api/questions/:id/correct-answer</code> بالضغط على
-          الاختيار.
+          {kind === 'general' ? (
+            <>
+              تُرفع الصور دفعة واحدة عبر{' '}
+              <code className="text-xs">
+                POST /api/admin/course-management/general-exams/&#123;examId&#125;/questions/images
+              </code>{' '}
+              كـ multipart: <code className="text-xs">images</code> (حتى 10 صور) +{' '}
+              <code className="text-xs">data=&#123;&quot;correct_option_key&quot;:&quot;أ&quot;&#125;</code>.
+              كل صورة = سؤال صورة فقط + خيارات أ/ب/ج/د تلقائيًا.
+            </>
+          ) : (
+            <>
+              يُرسل كل سؤال عبر{' '}
+              <code className="text-xs">
+                POST /api/admin/course-management/level-exams/&#123;examId&#125;/questions
+              </code>{' '}
+              كـ multipart: <code className="text-xs">data=&#123;&quot;correct_option_key&quot;:&quot;أ&quot;&#125;</code>{' '}
+              + <code className="text-xs">image</code>. بدون نص وبدون options يدويًا — السيرفر يضيف أ/ب/ج/د تلقائيًا.
+            </>
+          )}
         </div>
 
-        <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-4 py-8 text-center text-sm font-bold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200">
-          <UploadCloud className="h-7 w-7 text-sky-600" />
-          <span>اختر حتى 10 صور أو الصق صورة (Ctrl+V)</span>
-          <span className="text-xs font-medium text-zinc-500">
-            {files.length === 0 ? 'لم يتم اختيار صور بعد' : `${files.length} / 10 صور`}
-          </span>
-          <input
-            ref={inputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            className="hidden"
-            onChange={(e) => addFiles(e.target.files)}
-          />
-        </label>
+        <div
+          ref={zoneRef}
+          tabIndex={0}
+          className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50/60 p-4 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-200 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-sky-900/40"
+        >
+          <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-zinc-300 bg-white px-4 py-8 text-center text-sm font-bold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800">
+            <UploadCloud className="h-7 w-7 text-sky-600" />
+            <span>اختر حتى 10 صور أو الصق صورة (Ctrl+V)</span>
+            <span className="text-xs font-medium text-zinc-500">
+              {items.length === 0 ? 'لم يتم اختيار صور بعد' : `${items.length} / 10 صور`}
+            </span>
+            <input
+              ref={inputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => addFiles(e.target.files)}
+            />
+          </label>
+          {pasteHint && (
+            <p className="mt-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+              {pasteHint}
+            </p>
+          )}
+        </div>
 
-        {files.length > 0 && (
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-            {files.map((file, index) => (
+        {items.length > 0 && (
+          <div className="space-y-3">
+            {items.map((item, index) => (
               <div
-                key={`${file.name}-${file.size}-${index}`}
-                className="relative overflow-hidden rounded-xl border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900"
+                key={item.id}
+                className="flex flex-col gap-3 rounded-2xl border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900 sm:flex-row"
               >
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={previewUrls[index]}
-                  alt={file.name}
-                  className="aspect-[4/3] w-full bg-zinc-100 object-contain dark:bg-zinc-950"
-                />
+                <div className="relative w-full shrink-0 overflow-hidden rounded-xl bg-zinc-100 sm:w-40 dark:bg-zinc-950">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={item.previewUrl}
+                    alt={item.file.name}
+                    className="aspect-[4/3] w-full object-contain"
+                  />
+                  <span className="absolute start-2 top-2 rounded-full bg-sky-600 px-2 py-0.5 text-[11px] font-black text-white">
+                    #{index + 1}
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <p className="truncate text-sm font-bold text-zinc-800 dark:text-zinc-100">
+                    {item.file.name}
+                  </p>
+                  <p className="text-xs font-bold text-zinc-500">الإجابة الصحيحة (correct_option_key)</p>
+                  <div className="flex flex-wrap gap-2">
+                    {ARABIC_OPTION_KEYS.map((key) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => setCorrectKey(item.id, key)}
+                        className={`inline-flex h-10 w-10 items-center justify-center rounded-xl text-sm font-black transition ${
+                          item.correctKey === key
+                            ? 'bg-emerald-600 text-white shadow'
+                            : 'border border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200'
+                        }`}
+                      >
+                        {key}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <button
                   type="button"
-                  onClick={() => setFiles((prev) => prev.filter((_, i) => i !== index))}
-                  className="absolute start-1.5 top-1.5 inline-flex h-7 w-7 items-center justify-center rounded-full bg-red-600 text-white"
+                  onClick={() => removeItem(item.id)}
+                  className="inline-flex h-9 w-9 shrink-0 items-center justify-center self-start rounded-full bg-red-600 text-white"
+                  aria-label="حذف"
                 >
-                  <X className="h-3.5 w-3.5" />
+                  <X className="h-4 w-4" />
                 </button>
               </div>
             ))}
@@ -728,11 +854,11 @@ function ImageQuestionsModal({
 
         <button
           type="submit"
-          disabled={busy || files.length === 0}
+          disabled={busy || items.length === 0}
           className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-sky-600 py-3 text-sm font-black text-white transition hover:bg-sky-700 disabled:opacity-60"
         >
           {busy && <Loader2 className="h-4 w-4 animate-spin" />}
-          {busy ? 'جاري الرفع…' : `رفع ${files.length || ''} سؤال صورة`}
+          {busy ? 'جاري الإضافة…' : `إضافة ${items.length || ''} سؤال صورة`}
         </button>
       </form>
     </Modal>
@@ -767,12 +893,59 @@ function QuestionFormModal({
     Math.max(0, sortedOptions?.findIndex((option) => option.is_correct) ?? 0)
   );
   const [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState<'full' | 'image_only'>(
+    editing
+      ? editing.question_type === 'IMAGE' || (!editing.text?.trim() && !!(editing.image_blob || editing.image_url))
+        ? 'image_only'
+        : 'full'
+      : 'full'
+  );
+  const [imageOnlyCorrect, setImageOnlyCorrect] = useState<ArabicOptionKey>('أ');
+  const imagePreviewUrl = useMemo(
+    () => (imageFile ? URL.createObjectURL(imageFile) : null),
+    [imageFile]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+    };
+  }, [imagePreviewUrl]);
+
   const isImageQuestion =
+    mode === 'image_only' ||
     editing?.question_type === 'IMAGE' ||
     (!!(editing && !editing.text?.trim()) && !!(editing.image_blob || editing.image_url));
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+
+    // سؤال صورة فقط: correct_option_key + image
+    if (!editing && mode === 'image_only') {
+      if (!imageFile) {
+        onError('ارفع صورة السؤال أولًا');
+        return;
+      }
+      setBusy(true);
+      try {
+        if (kind === 'general') {
+          await createGeneralExamImageOnlyQuestion(examId, imageOnlyCorrect, imageFile, {
+            position: asOptionalNumber(position),
+          });
+        } else {
+          await createLevelExamImageOnlyQuestion(examId, imageOnlyCorrect, imageFile, {
+            position: asOptionalNumber(position),
+          });
+        }
+        await onSaved();
+      } catch (err) {
+        onError(apiErr(err));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     if (!isImageQuestion && !text.trim()) {
       onError('نص السؤال مطلوب');
       return;
@@ -783,7 +956,7 @@ function QuestionFormModal({
     }
 
     const payload: McqQuestionPayload = {
-      text: text.trim(),
+      text: text.trim() || null,
       image_url: imageUrl.trim() || null,
       position: asOptionalNumber(position),
       options: options.map((option, index) => ({
@@ -820,13 +993,99 @@ function QuestionFormModal({
     <Modal title={editing ? 'تعديل سؤال' : 'إضافة سؤال'} onClose={onClose}>
       <form onSubmit={submit}>
         <div className="space-y-4">
+          {!editing && (
+            <div className="grid grid-cols-2 gap-2 rounded-2xl bg-zinc-100 p-1 dark:bg-zinc-950">
+              <button
+                type="button"
+                onClick={() => setMode('full')}
+                className={`rounded-xl px-3 py-2 text-sm font-black transition ${
+                  mode === 'full'
+                    ? 'bg-white text-blue-700 shadow dark:bg-zinc-800 dark:text-white'
+                    : 'text-zinc-500'
+                }`}
+              >
+                سؤال نصي / مع صورة
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('image_only')}
+                className={`rounded-xl px-3 py-2 text-sm font-black transition ${
+                  mode === 'image_only'
+                    ? 'bg-white text-sky-700 shadow dark:bg-zinc-800 dark:text-white'
+                    : 'text-zinc-500'
+                }`}
+              >
+                صورة فقط
+              </button>
+            </div>
+          )}
+
+          {mode === 'image_only' && !editing ? (
+            <>
+              <div className="rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-sm leading-7 text-sky-950 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
+                بدون نص وبدون options يدويًا. أرسل الصورة +{' '}
+                <code className="text-xs">correct_option_key</code>، والسيرفر يضيف أ/ب/ج/د تلقائيًا.
+              </div>
+              <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-4 py-8 text-sm font-bold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200">
+                <UploadCloud className="h-6 w-6 text-sky-600" />
+                {imageFile ? imageFile.name : 'رفع أو اختيار صورة السؤال'}
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    setImageFile(e.target.files?.[0] ?? null);
+                    if (e.target.files?.[0]) setImageUrl('');
+                  }}
+                />
+              </label>
+              {imagePreviewUrl && (
+                <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={imagePreviewUrl}
+                    alt="معاينة"
+                    className="max-h-56 w-full object-contain"
+                  />
+                </div>
+              )}
+              <div>
+                <p className="mb-2 text-xs font-black text-zinc-500">الإجابة الصحيحة</p>
+                <div className="flex flex-wrap gap-2">
+                  {ARABIC_OPTION_KEYS.map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setImageOnlyCorrect(key)}
+                      className={`inline-flex h-11 w-11 items-center justify-center rounded-xl text-sm font-black transition ${
+                        imageOnlyCorrect === key
+                          ? 'bg-emerald-600 text-white shadow'
+                          : 'border border-zinc-200 bg-white text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900'
+                      }`}
+                    >
+                      {key}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <input
+                type="number"
+                min={1}
+                value={position}
+                onChange={(e) => setPosition(e.target.value)}
+                placeholder="position اختياري"
+                className={fieldClassName}
+              />
+            </>
+          ) : (
+            <>
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
             rows={4}
             placeholder="نص السؤال — يدعم LaTeX مثل $\\frac{1}{2}$ أو $3.14$"
             className={fieldClassName}
-            dir="auto"
+            dir="rtl"
           />
           <div className="grid gap-3 md:grid-cols-[1fr_8rem]">
             <input
@@ -847,7 +1106,7 @@ function QuestionFormModal({
           </div>
           <label className="flex cursor-pointer items-center justify-center gap-2 rounded-2xl border border-dashed border-zinc-300 bg-zinc-50 px-4 py-3 text-sm font-bold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200">
             <UploadCloud className="h-4 w-4" />
-            {imageFile ? imageFile.name : 'رفع صورة السؤال من الجهاز'}
+            {imageFile ? imageFile.name : 'رفع صورة السؤال من الجهاز (تُحفظ مع السؤال)'}
             <input
               type="file"
               accept="image/*"
@@ -886,6 +1145,8 @@ function QuestionFormModal({
               </div>
             ))}
           </div>
+            </>
+          )}
         </div>
 
         <button type="submit" disabled={busy} className={primaryButtonClassName}>

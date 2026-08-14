@@ -69,12 +69,30 @@ function getEmbeddableVideoUrl(videoUrl: string): string {
 
   try {
     const url = new URL(trimmed);
-    const host = url.hostname.replace(/^www\./, '');
+    const host = url.hostname.replace(/^www\./, '').replace(/^m\./, '');
 
+    // YouTube: watch / youtu.be / embed / shorts
+    if (host === 'youtube.com' || host === 'youtu.be' || host === 'youtube-nocookie.com') {
+      let videoId: string | null = null;
+      if (host === 'youtu.be') {
+        videoId = url.pathname.split('/').filter(Boolean)[0] ?? null;
+      } else if (url.pathname.startsWith('/embed/')) {
+        videoId = url.pathname.split('/')[2] ?? null;
+      } else if (url.pathname.startsWith('/shorts/')) {
+        videoId = url.pathname.split('/')[2] ?? null;
+      } else {
+        videoId = url.searchParams.get('v');
+      }
+      if (videoId) {
+        const id = encodeURIComponent(videoId.split('?')[0]!);
+        return `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1`;
+      }
+    }
+
+    // Google Drive: file/d/ID or open?id=
     if (host === 'drive.google.com') {
       const fileMatch = url.pathname.match(/\/file\/d\/([^/]+)/);
       const fileId = fileMatch?.[1] ?? url.searchParams.get('id');
-
       if (fileId) {
         return `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/preview`;
       }
@@ -84,6 +102,17 @@ function getEmbeddableVideoUrl(videoUrl: string): string {
   }
 
   return trimmed;
+}
+
+function videoSourceHint(videoUrl: string): string {
+  const trimmed = videoUrl.trim().toLowerCase();
+  if (trimmed.includes('youtu')) {
+    return 'يتم عرض فيديو YouTube داخل الإطار.';
+  }
+  if (trimmed.includes('drive.google.com')) {
+    return 'لو لم يظهر فيديو Drive، تأكد من صلاحية المشاركة (Anyone with the link).';
+  }
+  return 'لو لم يظهر الفيديو، افتح الرابط الأصلي وتحقق من صلاحيات المشاركة.';
 }
 
 export function CourseContentManagement() {
@@ -1217,7 +1246,7 @@ function EditLessonModal({
           <input
             value={videoUrl}
             onChange={(e) => setVideoUrl(e.target.value)}
-            placeholder="video_url"
+            placeholder="رابط YouTube أو Google Drive"
             className={fieldClassName}
             dir="ltr"
           />
@@ -1286,9 +1315,7 @@ function VideoPreviewModal({
           />
         </div>
         <div className="flex flex-row-reverse items-center justify-between gap-3 bg-zinc-950 px-4 py-3 text-right">
-          <p className="text-xs text-zinc-400">
-            لو لم يظهر الفيديو، تأكد من صلاحيات مشاركة ملف Google Drive.
-          </p>
+          <p className="text-xs text-zinc-400">{videoSourceHint(videoUrl)}</p>
           <a
             href={videoUrl}
             target="_blank"
@@ -1371,7 +1398,7 @@ function CreateLessonPanel({
             <div className="space-y-3">
               <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="عنوان الدرس" className={fieldClassName} />
               <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="وصف الدرس" rows={2} className={fieldClassName} />
-              <input value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)} placeholder="video_url" className={fieldClassName} dir="ltr" />
+              <input value={videoUrl} onChange={(e) => setVideoUrl(e.target.value)} placeholder="رابط YouTube أو Google Drive" className={fieldClassName} dir="ltr" />
               <input type="number" min={1} value={position} onChange={(e) => setPosition(e.target.value)} placeholder="position اختياري" className={fieldClassName} />
 
               <div className="rounded-2xl bg-zinc-50 p-3 dark:bg-zinc-950">
@@ -1789,8 +1816,8 @@ function CreateGeneralExamPanel({
 }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState('');
-  const [isFinal, setIsFinal] = useState(false);
-  const [passPercentage, setPassPercentage] = useState('80');
+  const [duration, setDuration] = useState('60');
+  const [passingPercentage, setPassingPercentage] = useState('70');
   const [isActive, setIsActive] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -1800,22 +1827,27 @@ function CreateGeneralExamPanel({
       onError('عنوان الامتحان مطلوب');
       return;
     }
-    const pass = asOptionalNumber(passPercentage);
-    if (isFinal && pass == null) {
-      onError('الامتحان النهائي يتطلب pass_percentage');
+    const durationValue = asOptionalNumber(duration);
+    const passingValue = asOptionalNumber(passingPercentage);
+    if (durationValue == null || durationValue <= 0) {
+      onError('مدة الامتحان مطلوبة (بالدقائق)');
+      return;
+    }
+    if (passingValue == null) {
+      onError('نسبة النجاح مطلوبة');
       return;
     }
     setBusy(true);
     try {
       await createGeneralExam(courseId, {
         title: title.trim(),
-        is_final: isFinal,
-        ...(pass != null ? { pass_percentage: pass } : {}),
+        duration: durationValue,
+        passing_percentage: passingValue,
         is_active: isActive,
       });
       setTitle('');
-      setIsFinal(false);
-      setPassPercentage('80');
+      setDuration('60');
+      setPassingPercentage('70');
       setIsActive(true);
       await onCreated();
       setOpen(false);
@@ -1831,8 +1863,8 @@ function CreateGeneralExamPanel({
       <section className="rounded-3xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
         <SectionTitle
           icon={FileQuestion}
-          title="امتحان عام/نهائي"
-          hint="أضف امتحانًا عامًا أو نهائيًا للكورس"
+          title="امتحان عام"
+          hint="أضف امتحانًا عامًا للكورس"
         />
         <button type="button" onClick={() => setOpen(true)} className={primaryButtonClassName}>
           <Plus className="h-4 w-4" />
@@ -1842,18 +1874,15 @@ function CreateGeneralExamPanel({
 
       {open && (
         <AddFormModal
-          title="امتحان عام/نهائي"
-          hint="POST /courses/:courseId/general-exams"
+          title="امتحان عام"
+          hint='POST /courses/:courseId/general-exams — body: {"title","duration","passing_percentage","is_active"}'
           onClose={() => setOpen(false)}
         >
           <form onSubmit={submit}>
             <div className="space-y-3">
-              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Final Exam" className={fieldClassName} />
-              <input type="number" min={0} max={100} value={passPercentage} onChange={(e) => setPassPercentage(e.target.value)} placeholder="pass_percentage" className={fieldClassName} />
-              <label className="flex cursor-pointer items-center justify-between rounded-2xl bg-zinc-50 px-4 py-3 text-sm font-bold dark:bg-zinc-950">
-                <input type="checkbox" checked={isFinal} onChange={(e) => setIsFinal(e.target.checked)} />
-                امتحان نهائي
-              </label>
+              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Exam" className={fieldClassName} />
+              <input type="number" min={1} max={600} value={duration} onChange={(e) => setDuration(e.target.value)} placeholder="duration (دقيقة)" className={fieldClassName} />
+              <input type="number" min={0} max={100} value={passingPercentage} onChange={(e) => setPassingPercentage(e.target.value)} placeholder="passing_percentage" className={fieldClassName} />
               <label className="flex cursor-pointer items-center justify-between rounded-2xl bg-zinc-50 px-4 py-3 text-sm font-bold dark:bg-zinc-950">
                 <input type="checkbox" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
                 نشط

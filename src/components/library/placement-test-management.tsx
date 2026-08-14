@@ -20,7 +20,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { MathText } from '@/components/library/math-text';
 import { OcrImportModal } from '@/components/library/ocr-import-modal';
 import { apiErr } from '@/lib/library-errors';
@@ -35,6 +35,9 @@ import type { QuestionListItem } from '@/types/question-library';
 import { OPTION_KEYS } from '@/types/question-library';
 
 type Tab = 'levels' | 'test' | 'questions' | 'attempts';
+
+const ARABIC_OPTION_KEYS = ['أ', 'ب', 'ج', 'د'] as const;
+type ArabicOptionKey = (typeof ARABIC_OPTION_KEYS)[number];
 
 function asNumber(value: string): number | null {
   const parsed = Number(value);
@@ -80,10 +83,12 @@ export function PlacementTestManagement() {
   >(null);
   const [importOpen, setImportOpen] = useState(false);
   const [ocrOpen, setOcrOpen] = useState(false);
+  const [imageQuestionsOpen, setImageQuestionsOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<
     | { type: 'level'; id: number; title: string }
     | { type: 'test'; id: number; title: string }
     | { type: 'question'; id: number; title: string }
+    | { type: 'all-questions'; testId: number; count: number }
     | null
   >(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -119,15 +124,15 @@ export function PlacementTestManagement() {
     }
   }
 
-  async function loadQuestions(testId = activeTest?.id) {
+  async function loadQuestions(testId = activeTest?.id, options?: { quiet?: boolean }) {
     if (!testId) return;
-    setQuestionsLoading(true);
+    if (!options?.quiet) setQuestionsLoading(true);
     try {
       setQuestions(await placement.fetchPlacementQuestions(testId));
     } catch (e) {
       setBanner(apiErr(e));
     } finally {
-      setQuestionsLoading(false);
+      if (!options?.quiet) setQuestionsLoading(false);
     }
   }
 
@@ -142,19 +147,48 @@ export function PlacementTestManagement() {
     }
   }
 
+  function upsertQuestionLocal(question: placement.PlacementQuestion) {
+    setQuestions((prev) => {
+      const index = prev.findIndex((item) => item.id === question.id);
+      if (index < 0) {
+        return [...prev, question].sort((a, b) => a.position - b.position);
+      }
+      const next = [...prev];
+      next[index] = question;
+      return next.sort((a, b) => a.position - b.position);
+    });
+  }
+
+  function removeQuestionLocal(questionId: number) {
+    setQuestions((prev) => prev.filter((item) => item.id !== questionId));
+  }
+
   async function deleteSelected() {
     if (!deleteTarget) return;
     setDeleteBusy(true);
     try {
       if (deleteTarget.type === 'level') {
         await placement.deletePlacementLevel(deleteTarget.id);
+        setDeleteTarget(null);
+        await loadBase();
       } else if (deleteTarget.type === 'test') {
         await placement.deletePlacementTest(deleteTarget.id);
+        setDeleteTarget(null);
+        await loadBase();
+      } else if (deleteTarget.type === 'all-questions') {
+        const ids = questions.map((question) => question.id);
+        for (const id of ids) {
+          await placement.deletePlacementQuestion(id);
+        }
+        setQuestions([]);
+        setDeleteTarget(null);
+        setBanner(null);
       } else {
         await placement.deletePlacementQuestion(deleteTarget.id);
+        removeQuestionLocal(deleteTarget.id);
+        setDeleteTarget(null);
+        setBanner(null);
       }
-      setDeleteTarget(null);
-      await loadBase();
     } catch (e) {
       setBanner(apiErr(e));
     } finally {
@@ -261,6 +295,7 @@ export function PlacementTestManagement() {
           onCreate={() => setQuestionModal({ mode: 'create' })}
           onImport={() => setImportOpen(true)}
           onOcr={() => setOcrOpen(true)}
+          onAddImages={() => setImageQuestionsOpen(true)}
           onEdit={(question) => setQuestionModal({ mode: 'edit', question })}
           onDelete={(question) =>
             setDeleteTarget({
@@ -269,12 +304,20 @@ export function PlacementTestManagement() {
               title: question.text?.trim() || `سؤال صورة #${question.position}`,
             })
           }
+          onDeleteAll={() => {
+            if (!activeTest || questions.length === 0) return;
+            setDeleteTarget({
+              type: 'all-questions',
+              testId: activeTest.id,
+              count: questions.length,
+            });
+          }}
           onSetCorrect={async (question, choiceId) => {
             try {
               const sorted = question.choices
                 .slice()
                 .sort((a, b) => a.position - b.position);
-              await placement.updatePlacementQuestion(question.id, {
+              const updated = await placement.updatePlacementQuestion(question.id, {
                 text: question.text,
                 points: question.points,
                 position: question.position,
@@ -287,7 +330,7 @@ export function PlacementTestManagement() {
                   position: choice.position,
                 })),
               });
-              await loadQuestions(activeTest?.id);
+              upsertQuestionLocal(updated);
               setBanner(null);
             } catch (e) {
               setBanner(apiErr(e));
@@ -333,9 +376,10 @@ export function PlacementTestManagement() {
           testId={activeTest.id}
           state={questionModal}
           onClose={() => setQuestionModal(null)}
-          onSaved={async () => {
-            await loadQuestions(activeTest.id);
+          onSaved={async (question) => {
+            upsertQuestionLocal(question);
             setQuestionModal(null);
+            setBanner(null);
           }}
           onError={setBanner}
         />
@@ -346,7 +390,7 @@ export function PlacementTestManagement() {
           testId={activeTest.id}
           onClose={() => setImportOpen(false)}
           onImported={async () => {
-            await loadQuestions(activeTest.id);
+            await loadQuestions(activeTest.id, { quiet: true });
             setImportOpen(false);
           }}
           onError={setBanner}
@@ -357,7 +401,7 @@ export function PlacementTestManagement() {
         <OcrImportModal
           onClose={() => setOcrOpen(false)}
           onDone={async () => {
-            await loadQuestions(activeTest.id);
+            await loadQuestions(activeTest.id, { quiet: true });
             setOcrOpen(false);
           }}
           addButtonLabel="إضافة الأسئلة لاختبار التحديد"
@@ -391,18 +435,43 @@ export function PlacementTestManagement() {
                 })),
               };
 
-              await placement.createPlacementQuestion(activeTest.id, payload);
+              const created = await placement.createPlacementQuestion(activeTest.id, payload);
+              upsertQuestionLocal(created);
               position += 1;
             }
           }}
         />
       )}
 
+      {imageQuestionsOpen && activeTest && (
+        <PlacementImageQuestionsModal
+          testId={activeTest.id}
+          nextPosition={
+            questions.length > 0
+              ? Math.max(...questions.map((q) => q.position ?? 0)) + 1
+              : 1
+          }
+          onClose={() => setImageQuestionsOpen(false)}
+          onCreated={(question) => {
+            upsertQuestionLocal(question);
+          }}
+          onDone={() => {
+            setImageQuestionsOpen(false);
+            setBanner(null);
+          }}
+          onError={setBanner}
+        />
+      )}
+
       {deleteTarget && (
         <ConfirmModal
           title="تأكيد الحذف"
-          message={`هل تريد حذف "${deleteTarget.title}"؟`}
-          confirmLabel="حذف"
+          message={
+            deleteTarget.type === 'all-questions'
+              ? `هل تريد حذف كل الأسئلة (${deleteTarget.count}) دفعة واحدة؟ لا يمكن التراجع.`
+              : `هل تريد حذف "${deleteTarget.title}"؟`
+          }
+          confirmLabel={deleteTarget.type === 'all-questions' ? 'حذف الكل' : 'حذف'}
           busy={deleteBusy}
           onCancel={() => setDeleteTarget(null)}
           onConfirm={deleteSelected}
@@ -584,8 +653,10 @@ function QuestionsPanel({
   onCreate,
   onImport,
   onOcr,
+  onAddImages,
   onEdit,
   onDelete,
+  onDeleteAll,
   onSetCorrect,
 }: {
   test: placement.PlacementTest | null;
@@ -595,8 +666,10 @@ function QuestionsPanel({
   onCreate: () => void;
   onImport: () => void;
   onOcr: () => void;
+  onAddImages: () => void;
   onEdit: (question: placement.PlacementQuestion) => void;
   onDelete: (question: placement.PlacementQuestion) => void;
+  onDeleteAll: () => void;
   onSetCorrect: (question: placement.PlacementQuestion, choiceId: number) => Promise<void>;
 }) {
   return (
@@ -604,12 +677,21 @@ function QuestionsPanel({
       <SectionHeader
         icon={FileQuestion}
         title="بنك أسئلة اختبار تحديد المستوى"
-        hint="اضغط على أي اختيار لتعيينه كإجابة صحيحة مباشرة."
+        hint="اضغط على أي اختيار لتعيينه كإجابة صحيحة مباشرة. التعديل والحذف يحدّثان القائمة بدون إعادة تحميل الصفحة."
         action={
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={onCreate} disabled={!test} className={primarySmallButtonClassName}>
               <Plus className="h-4 w-4" />
               إضافة سؤال
+            </button>
+            <button
+              type="button"
+              onClick={onAddImages}
+              disabled={!test}
+              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-sky-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-sky-700 disabled:opacity-60"
+            >
+              <ImageIcon className="h-4 w-4" />
+              أسئلة كصور
             </button>
             <button type="button" onClick={onImport} disabled={!test} className={secondarySmallButtonClassName}>
               <Import className="h-4 w-4" />
@@ -624,6 +706,15 @@ function QuestionsPanel({
               <FileText className="h-4 w-4" />
               استخراج من PDF/صورة
             </button>
+            <button
+              type="button"
+              onClick={onDeleteAll}
+              disabled={!test || questions.length === 0}
+              className="inline-flex items-center justify-center gap-2 rounded-2xl bg-red-600 px-4 py-2.5 text-sm font-black text-white transition hover:bg-red-700 disabled:opacity-60"
+            >
+              <Trash2 className="h-4 w-4" />
+              حذف الكل
+            </button>
             <button type="button" onClick={onRefresh} disabled={!test || loading} className={ghostSmallButtonClassName}>
               <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
               تحديث
@@ -636,7 +727,7 @@ function QuestionsPanel({
       ) : loading ? (
         <LoadingState text="جاري تحميل الأسئلة..." />
       ) : questions.length === 0 ? (
-        <EmptyState text="لا توجد أسئلة بعد. أضف سؤالًا نصيًا أو استورد من المكتبة." />
+        <EmptyState text="لا توجد أسئلة بعد. أضف سؤالًا نصيًا أو أسئلة كصور أو استورد من المكتبة." />
       ) : (
         <div className="mt-5 space-y-3">
           {questions.map((question) => (
@@ -1021,6 +1112,258 @@ function TestModal({
   );
 }
 
+function PlacementImageQuestionsModal({
+  testId,
+  nextPosition,
+  onClose,
+  onCreated,
+  onDone,
+  onError,
+}: {
+  testId: number;
+  nextPosition: number;
+  onClose: () => void;
+  onCreated: (question: placement.PlacementQuestion) => void;
+  onDone: () => void;
+  onError: (message: string) => void;
+}) {
+  type Draft = {
+    id: string;
+    file: File;
+    previewUrl: string;
+    correctKey: ArabicOptionKey;
+  };
+
+  const [items, setItems] = useState<Draft[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+  const [pasteHint, setPasteHint] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const zoneRef = useRef<HTMLDivElement>(null);
+  const pasteLockRef = useRef(0);
+
+  useEffect(() => {
+    zoneRef.current?.focus();
+    return () => {
+      for (const item of items) URL.revokeObjectURL(item.previewUrl);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function addFiles(list: FileList | File[] | null) {
+    if (!list) return;
+    const next = Array.from(list).filter((file) => file.type.startsWith('image/'));
+    if (!next.length) {
+      setLocalError('اختر صورًا فقط.');
+      return;
+    }
+    setItems((prev) => {
+      const room = Math.max(0, 10 - prev.length);
+      const incoming = next.slice(0, room).map((file) => ({
+        id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2)}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+        correctKey: 'أ' as ArabicOptionKey,
+      }));
+      return [...prev, ...incoming];
+    });
+    setLocalError(null);
+    if (inputRef.current) inputRef.current.value = '';
+  }
+
+  function handlePaste(e: ClipboardEvent) {
+    const now = Date.now();
+    if (now - pasteLockRef.current < 400) return;
+    pasteLockRef.current = now;
+
+    const images: File[] = [];
+    const seen = new Set<string>();
+    for (const item of Array.from(e.clipboardData?.items ?? [])) {
+      if (!item.type.startsWith('image/')) continue;
+      const blob = item.getAsFile();
+      if (!blob) continue;
+      const fingerprint = `${blob.type}:${blob.size}`;
+      if (seen.has(fingerprint)) continue;
+      seen.add(fingerprint);
+      const ext = blob.type.split('/')[1] || 'png';
+      images.push(
+        new File([blob], `لصق-${now}-${images.length}.${ext}`, {
+          type: blob.type,
+        })
+      );
+    }
+    if (!images.length) return;
+    e.preventDefault();
+    addFiles(images);
+    setPasteHint(`تم لصق ${images.length} صورة.`);
+  }
+
+  useEffect(() => {
+    function onWindowPaste(e: ClipboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('input, textarea, [contenteditable="true"]')) return;
+      handlePaste(e);
+    }
+    window.addEventListener('paste', onWindowPaste);
+    return () => window.removeEventListener('paste', onWindowPaste);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function removeItem(id: string) {
+    setItems((prev) => {
+      const target = prev.find((item) => item.id === id);
+      if (target) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((item) => item.id !== id);
+    });
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (items.length === 0) {
+      setLocalError('أضف صورة واحدة على الأقل وحدد الإجابة الصحيحة لكل صورة.');
+      return;
+    }
+    setBusy(true);
+    setLocalError(null);
+    try {
+      let position = nextPosition;
+      for (const item of items) {
+        const created = await placement.createPlacementImageOnlyQuestion(
+          testId,
+          item.correctKey,
+          item.file,
+          { points: 1, position }
+        );
+        onCreated(created);
+        position += 1;
+      }
+      for (const item of items) URL.revokeObjectURL(item.previewUrl);
+      setItems([]);
+      onDone();
+    } catch (err) {
+      const message = apiErr(err);
+      setLocalError(message);
+      onError(message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="إضافة أسئلة صورة فقط" onClose={onClose} maxWidth="max-w-3xl">
+      <form onSubmit={submit} className="space-y-4" dir="rtl">
+        <div className="rounded-2xl border border-sky-100 bg-sky-50 px-4 py-3 text-sm leading-7 text-sky-950 dark:border-sky-900/40 dark:bg-sky-950/30 dark:text-sky-100">
+          بدون نص وبدون options يدويًا. لكل صورة يُرسل{' '}
+          <code className="text-xs">correct_option_key</code> + الصورة عبر multipart إلى{' '}
+          <code className="text-xs">POST /api/admin/placement/tests/{'{testId}'}/questions</code>.
+          السيرفر يضيف أ/ب/ج/د تلقائيًا.
+        </div>
+
+        <div
+          ref={zoneRef}
+          tabIndex={0}
+          className="rounded-2xl border border-dashed border-zinc-300 bg-zinc-50/60 p-4 outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-200 dark:border-zinc-700 dark:bg-zinc-950 dark:focus:ring-sky-900/40"
+        >
+          <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border border-zinc-300 bg-white px-4 py-8 text-center text-sm font-bold text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800">
+            <UploadCloud className="h-7 w-7 text-sky-600" />
+            <span>اختر حتى 10 صور أو الصق صورة (Ctrl+V)</span>
+            <span className="text-xs font-medium text-zinc-500">
+              {items.length === 0 ? 'لم يتم اختيار صور بعد' : `${items.length} / 10 صور`}
+            </span>
+            <input
+              ref={inputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(e) => addFiles(e.target.files)}
+            />
+          </label>
+          {pasteHint && (
+            <p className="mt-2 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+              {pasteHint}
+            </p>
+          )}
+        </div>
+
+        {items.length > 0 && (
+          <div className="space-y-3">
+            {items.map((item, index) => (
+              <div
+                key={item.id}
+                className="flex flex-col gap-3 rounded-2xl border border-zinc-200 bg-white p-3 dark:border-zinc-700 dark:bg-zinc-900 sm:flex-row"
+              >
+                <div className="relative w-full shrink-0 overflow-hidden rounded-xl bg-zinc-100 sm:w-40 dark:bg-zinc-950">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={item.previewUrl}
+                    alt={item.file.name}
+                    className="aspect-[4/3] w-full object-contain"
+                  />
+                  <span className="absolute start-2 top-2 rounded-full bg-sky-600 px-2 py-0.5 text-[11px] font-black text-white">
+                    #{index + 1}
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <p className="truncate text-sm font-bold text-zinc-800 dark:text-zinc-100">
+                    {item.file.name}
+                  </p>
+                  <p className="text-xs font-bold text-zinc-500">الإجابة الصحيحة (correct_option_key)</p>
+                  <div className="flex flex-wrap gap-2">
+                    {ARABIC_OPTION_KEYS.map((key) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() =>
+                          setItems((prev) =>
+                            prev.map((row) =>
+                              row.id === item.id ? { ...row, correctKey: key } : row
+                            )
+                          )
+                        }
+                        className={`inline-flex h-10 w-10 items-center justify-center rounded-xl text-sm font-black transition ${
+                          item.correctKey === key
+                            ? 'bg-emerald-600 text-white shadow'
+                            : 'border border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200'
+                        }`}
+                      >
+                        {key}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => removeItem(item.id)}
+                  className="inline-flex h-9 w-9 shrink-0 items-center justify-center self-start rounded-full bg-red-600 text-white"
+                  aria-label="حذف"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {localError && (
+          <p className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-200">
+            {localError}
+          </p>
+        )}
+
+        <button
+          type="submit"
+          disabled={busy || items.length === 0}
+          className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-sky-600 py-3 text-sm font-black text-white transition hover:bg-sky-700 disabled:opacity-60"
+        >
+          {busy && <Loader2 className="h-4 w-4 animate-spin" />}
+          {busy ? 'جاري الإضافة…' : `إضافة ${items.length || ''} سؤال صورة`}
+        </button>
+      </form>
+    </Modal>
+  );
+}
+
 function QuestionModal({
   testId,
   state,
@@ -1031,7 +1374,7 @@ function QuestionModal({
   testId: number;
   state: { mode: 'create' } | { mode: 'edit'; question: placement.PlacementQuestion };
   onClose: () => void;
-  onSaved: () => Promise<void>;
+  onSaved: (question: placement.PlacementQuestion) => Promise<void>;
   onError: (message: string) => void;
 }) {
   const editing = state.mode === 'edit' ? state.question : null;
@@ -1095,12 +1438,10 @@ function QuestionModal({
 
     setBusy(true);
     try {
-      if (editing) {
-        await placement.updatePlacementQuestion(editing.id, payload, imageFile);
-      } else {
-        await placement.createPlacementQuestion(testId, payload, imageFile);
-      }
-      await onSaved();
+      const saved = editing
+        ? await placement.updatePlacementQuestion(editing.id, payload, imageFile)
+        : await placement.createPlacementQuestion(testId, payload, imageFile);
+      await onSaved(saved);
     } catch (err) {
       onError(apiErr(err));
     } finally {

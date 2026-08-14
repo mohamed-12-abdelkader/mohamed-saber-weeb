@@ -48,13 +48,23 @@ export type PlacementChoicePayload = {
 };
 
 export type PlacementQuestionPayload = {
-  text: string | null;
-  points: number;
+  text?: string | null;
+  points?: number;
   position?: number;
   image_url?: string | null;
   image_blob?: string | null;
   image_mime_type?: string | null;
-  choices: PlacementChoicePayload[];
+  choices?: PlacementChoicePayload[];
+  /** سؤال صورة فقط — السيرفر يضيف أ/ب/ج/د تلقائيًا */
+  correct_option_key?: string;
+};
+
+export type PlacementImageOnlyPayload = {
+  correct_option_key: string;
+  points?: number;
+  position?: number;
+  image_blob?: string;
+  image_mime_type?: string;
 };
 
 export type PlacementChoice = {
@@ -116,7 +126,10 @@ export type PlacementAttemptDetail = PlacementAttempt & {
   mistakes_count: number;
 };
 
-function questionBody(payload: PlacementQuestionPayload, image?: File | null) {
+function questionBody(
+  payload: PlacementQuestionPayload | PlacementImageOnlyPayload,
+  image?: File | null
+) {
   if (!image) return payload;
   const form = new FormData();
   form.append('data', JSON.stringify(payload));
@@ -190,6 +203,28 @@ export async function createPlacementQuestion(
   payload: PlacementQuestionPayload,
   image?: File | null
 ): Promise<PlacementQuestion> {
+  const { data } = await api.post<{ question: PlacementQuestion }>(
+    `${BASE}/tests/${testId}/questions`,
+    questionBody(payload, image)
+  );
+  return data.question;
+}
+
+/**
+ * سؤال صورة فقط: بدون نص وبدون options يدويًا.
+ * multipart: data={"correct_option_key":"ب"} + image=@file
+ */
+export async function createPlacementImageOnlyQuestion(
+  testId: number,
+  correctOptionKey: string,
+  image: File,
+  extras?: { points?: number; position?: number }
+): Promise<PlacementQuestion> {
+  const payload: PlacementImageOnlyPayload = {
+    correct_option_key: correctOptionKey,
+    ...(extras?.points != null ? { points: extras.points } : {}),
+    ...(extras?.position != null ? { position: extras.position } : {}),
+  };
   const { data } = await api.post<{ question: PlacementQuestion }>(
     `${BASE}/tests/${testId}/questions`,
     questionBody(payload, image)
